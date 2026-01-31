@@ -6,28 +6,31 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
 from google import genai
+from openai import OpenAI
 
 # ================= CONFIG & SETUP =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
-if not BOT_TOKEN or not GEMINI_KEY:
-    raise SystemExit("❌ Missing BOT_TOKEN or GEMINI_API_KEY")
+if not all([BOT_TOKEN, GEMINI_KEY, OPENAI_KEY]):
+    raise SystemExit("❌ Missing ENV Vars (BOT_TOKEN, GEMINI_API_KEY, or OPENAI_API_KEY)")
 
-# Clients
-client = genai.Client(api_key=GEMINI_KEY)
+# Initialize Clients
+gen_client = genai.Client(api_key=GEMINI_KEY)
+oa_client = OpenAI(api_key=OPENAI_KEY)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# ================= STATE DATA =================
+# ================= DATA & FLAGS =================
 AI_ENABLED, SHORT_MODE, RUDE_MODE = True, True, False
 VISION_ENABLED, NSFW_ENABLED = True, True
-MEMORY, ADD_REPLY_STATE, REPLIES = {}, {}, {}
+MEMORY, REPLIES, ADD_REPLY_STATE = {}, {}, {}
 BLOCKED_WORDS, RESPECT_USERS = set(), set()
 _user_times = defaultdict(list)
 
-# ================= WORD LISTS (UNTOUCHED) =================
+# ================= WORD LISTS (AS PROVIDED) =================
 hindi_words = [
     "chutiya","madarchod","bhosdike","lund","gand","gaand","randi","behenchod","betichod","mc","bc",
     "lodu","lavde","harami","kutte","kamina","rakhail","randwa","suar","sasura","dogla","saala","tatti","chod","gaandu", "bhnchod","bkl",
@@ -50,23 +53,21 @@ phrases = ["send nudes","horny dm","let's have sex","i am horny","want to fuck",
 IDENTITY_TRIGGERS = ["who made you", "who created you", "who owns you", "who own you", "owner kaun", "admin kaun", "who developed you", "mg kaun", "mg kaun hai", "tumhe kisne banaya", "kisne banaya"]
 USERBOT_CMD_TRIGGERS = {"raid","spam","ping","eval","exec","repeat","dox","flood","bomb"}
 
-# ================= NORMALIZATION & PATTERNS =================
-def normalize_text_for_match(s: str) -> str:
+# ================= UTILS =================
+def normalize_text(s: str) -> str:
     if not s: return ""
     s = unicodedata.normalize("NFKD", s)
     s = re.sub(r'[\u0300-\u036f]+', "", s)
-    # Mapping logic preserved... (truncated for brevity but fully included in logic)
+    # Simple clean up to catch dots/symbols in bad words
     s = re.sub(r"[^a-z0-9\s]", " ", s.lower())
     return re.sub(r"\s+", " ", s).strip()
 
 def build_pattern(words):
     fragments = [re.escape(w).replace(r"\ ", r"[\W_]*") for w in words if w.strip()]
-    pattern = r"(?<![A-Za-z0-9])(?:" + "|".join(fragments) + r")(?![A-Za-z0-9])"
-    return re.compile(pattern, re.IGNORECASE | re.UNICODE)
+    return re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(fragments) + r")(?![A-Za-z0-9])", re.IGNORECASE)
 
 abuse_pattern = build_pattern(hindi_words + english_words + phrases + [f"{p} {c}" for p in family_prefixes for c in (hindi_words + english_words)])
 
-# ================= CORE LOGIC =================
 async def is_admin(m):
     if m.from_user.id == OWNER_ID: return True
     try:
@@ -74,107 +75,113 @@ async def is_admin(m):
         return member.status in ("administrator", "creator")
     except: return False
 
+# ================= AI BRAIN (DUAL) =================
 async def get_ai_reply(uid, text, mode):
-    # Context handling
     MEMORY.setdefault(uid, deque(maxlen=6))
     MEMORY[uid].append(f"user: {text}")
     context = "\n".join(MEMORY[uid])
     
-    # Mode logic preserved exactly
+    # SYSTEM PROMPTS (FROM CODE 1)
     styles = {
-        "boss": "You must always be respectful. English input->English, else Hinglish. Never roast. Max tokens 140.",
-        "respect": "Extremely polite. English input->English, else Hinglish. Soft tone. Max tokens 120.",
-        "short": "Sharp WITTY CLEAN roast if RUDE_MODE is ON. Max 2 lines. Else polite short reply.",
-        "long": "Calm, detailed, logical. Never cut replies."
+        "boss": "Always respectful. Calm, confident. If English reply English, else Hindi/Hinglish. No AI mentions. Max 140 tokens.",
+        "respect": "Soft, polite, obedient. Hindi/Hinglish preferred. Max 120 tokens.",
+        "short": "Sharp WITTY roast if RUDE_MODE is ON. Hindi/Hinglish. Max 2 lines. Else polite. Max 90 tokens.",
+        "long": "Detailed, calm, logic explanation. Max 250 tokens."
     }
-    
     sys_prompt = styles.get(mode, styles["long"])
-    if mode == "short" and RUDE_MODE: sys_prompt = styles["short"]
 
     try:
-        response = client.models.generate_content(
-            model="gemini-2.0-flash-lite", # Current 2026 stable
-            config={"system_instruction": sys_prompt},
-            contents=context
-        )
-        reply = response.text.strip()
+        # OpenAI handles Roasts and Boss Mode better
+        if mode in ["boss", "short"]:
+            res = oa_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": context}]
+            )
+            reply = res.choices[0].message.content.strip()
+        # Gemini handles General logic and Vision
+        else:
+            res = gen_client.models.generate_content(
+                model="gemini-2.0-flash-lite",
+                config={"system_instruction": sys_prompt},
+                contents=context
+            )
+            reply = res.text.strip()
+        
         MEMORY[uid].append(f"assistant: {reply}")
         return reply
-    except Exception as e:
-        return "⚠️ AI Error"
+    except: return "⚠️ System lag. Try again."
 
 # ================= HANDLERS =================
 @dp.message(CommandStart())
-async def start_cmd(m: types.Message):
-    await m.answer(f"🤖 <b>MG Master Guardian Activated!</b>\nHello {m.from_user.first_name}, security and AI online.")
+async def start_handler(m: types.Message):
+    await m.answer("🤖 <b>Guardian AI Activated.</b>\nWatching for abuse & ready to chat.")
+
+@dp.message(Command("ai", "short", "rude", "vision", "nsfw"))
+async def toggle_commands(m: types.Message, command: Command):
+    global AI_ENABLED, SHORT_MODE, RUDE_MODE, VISION_ENABLED, NSFW_ENABLED
+    if not await is_admin(m): return
+    val = m.text.lower().endswith("on")
+    cmd = command.command
+    if cmd == "ai": AI_ENABLED = val
+    elif cmd == "short": SHORT_MODE = val
+    elif cmd == "rude": RUDE_MODE = val
+    elif cmd == "vision": VISION_ENABLED = val
+    elif cmd == "nsfw": NSFW_ENABLED = val
+    await m.reply(f"✅ {cmd.upper()} is now {'ON' if val else 'OFF'}")
 
 @dp.message(F.photo)
-async def photo_mod(m: types.Message):
-    if m.forward_origin or not NSFW_ENABLED: return
-    
+async def photo_handler(m: types.Message):
+    if m.forward_origin: return
     file = await bot.get_file(m.photo[-1].file_id)
     img_data = await bot.download_file(file.file_path)
-    img_bytes = img_data.read()
-    
-    # NSFW Detection
-    b64 = base64.b64encode(img_bytes).decode()
-    res = client.models.generate_content(
-        model="gemini-2.0-flash-lite",
-        contents=["Answer YES only for porn, nudity or explicit content. Otherwise NO.", {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]
-    )
-    
-    if "yes" in res.text.lower():
-        await m.delete()
-        if m.chat.type in ("group", "supergroup"):
-            await m.chat.restrict(m.from_user.id, permissions=types.ChatPermissions(can_send_messages=False))
-            await m.answer(f"🚫 NSFW Detected. {m.from_user.first_name} muted.")
-    elif VISION_ENABLED:
-        res_v = client.models.generate_content(model="gemini-2.0-flash-lite", contents=["Casual friendly one-line comment.", {"inline_data": {"mime_type": "image/jpeg", "data": b64}}])
+    b64 = base64.b64encode(img_data.read()).decode()
+
+    if NSFW_ENABLED:
+        res = gen_client.models.generate_content(
+            model="gemini-2.0-flash-lite",
+            contents=["Answer YES only for porn/nudity. Otherwise NO.", {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]
+        )
+        if "yes" in res.text.lower():
+            await m.delete()
+            if m.chat.type != "private":
+                await m.chat.restrict(m.from_user.id, permissions=types.ChatPermissions(can_send_messages=False))
+                return await m.answer(f"🚫 {m.from_user.first_name} muted for NSFW.")
+
+    if VISION_ENABLED:
+        res_v = gen_client.models.generate_content(model="gemini-2.0-flash-lite", contents=["Casual friendly one-line comment.", {"inline_data": {"mime_type": "image/jpeg", "data": b64}}])
         await m.reply(res_v.text)
 
 @dp.message()
-async def master_handler(m: types.Message):
+async def main_text_handler(m: types.Message):
     if not m.text or m.from_user.is_bot: return
     uid, text = m.from_user.id, m.text.lower()
-    norm_text = normalize_text_for_match(text)
-
-    # 1. Admin/Owner Bypass
-    admin_status = await is_admin(m)
-
-    # 2. Userbot & Flood Protection
-    if not admin_status and m.chat.type in ("group", "supergroup"):
-        # Userbot check
+    norm_text = normalize_text(text)
+    
+    # 1. SECURITY (OWNER/ADMIN BYPASS)
+    admin = await is_admin(m)
+    if not admin and m.chat.type != "private":
+        # Userbot block
         if text.startswith((".", "/")) and text[1:].split()[0] in USERBOT_CMD_TRIGGERS:
             await m.delete()
             return await m.chat.restrict(uid, permissions=types.ChatPermissions(can_send_messages=False))
         
-        # Flood check
-        now = time.time()
-        _user_times[uid] = [t for t in _user_times[uid] if now - t < 5]
-        _user_times[uid].append(now)
-        if len(_user_times[uid]) >= 3:
-            await m.delete()
-            return await m.answer(f"⚠️ {m.from_user.first_name} muted for flooding.")
-
-        # Abuse check (Regex)
+        # Abuse check
         if abuse_pattern.search(norm_text):
             await m.delete()
             await m.chat.restrict(uid, permissions=types.ChatPermissions(can_send_messages=False))
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔓 Unmute", callback_data=f"unmute_{uid}")]])
-            return await m.answer(f"🚫 {m.from_user.first_name} muted for abusive language.", reply_markup=kb)
+            return await m.answer(f"🚫 <b>{m.from_user.first_name}</b> muted for abusive language.", reply_markup=kb)
 
-    # 3. Custom Replies & Identity
+    # 2. IDENTITY & REPLIES
     if any(t in text for t in IDENTITY_TRIGGERS):
         return await m.reply("MG Anjaan Rahi made me. Wahi mere owner and admin hai")
     
-    for k, v in REPLIES.items():
-        if k in norm_text: return await m.reply(v)
-
-    # 4. AI Gate
+    # 3. AI GATEWAY
     is_reply = m.reply_to_message and m.reply_to_message.from_user.id == bot.id
-    if is_reply or m.chat.type == "private":
+    mentioned = f"@{(await bot.me()).username.lower()}" in text
+    if (is_reply or mentioned or m.chat.type == "private") and AI_ENABLED:
         if any(b in norm_text for b in BLOCKED_WORDS):
-            return await m.reply("🚫 Restricted by Owner.")
+            return await m.reply("🚫 MG Anjaan Rahi has restricted me to answer this.")
         
         mode = "boss" if uid == OWNER_ID else ("respect" if uid in RESPECT_USERS else ("short" if SHORT_MODE else "long"))
         ans = await get_ai_reply(uid, m.text, mode)
@@ -182,13 +189,12 @@ async def master_handler(m: types.Message):
         await m.reply(f"{prefix}{ans}")
 
 @dp.callback_query(F.data.startswith("unmute_"))
-async def unmute_handler(c: CallbackQuery):
-    if not await is_admin(c): return await c.answer("Admins only!", show_alert=True)
+async def unmute_cb(c: CallbackQuery):
+    if not await is_admin(c): return await c.answer("❌ Admins only!", show_alert=True)
     uid = int(c.data.split("_")[1])
     await c.message.chat.restrict(uid, permissions=types.ChatPermissions(can_send_messages=True, can_send_media_messages=True))
-    await c.message.edit_text("✅ User unmuted.")
+    await c.message.edit_text("✅ User has been unmuted.")
 
-# ================= RUN =================
 async def main():
     await dp.start_polling(bot)
 
