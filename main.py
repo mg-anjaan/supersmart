@@ -107,7 +107,7 @@ def normalize_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-# ✅ NEW: Smart Pattern Builder
+# Smart Pattern Builder
 def tolerant_pattern(word):
     return r"[\W_]*".join(re.escape(c) for c in word)
 
@@ -129,7 +129,7 @@ LINK_PATTERN = re.compile(
 def get_unmute_kb(user_id):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔓 Unmute User", callback_data=f"unmute_{user_id}")]])
 
-# --- Gemini Logic (With Fallback) ---
+# --- Gemini Logic (DEBUG MODE) ---
 def remember(uid, role, text):
     MEMORY.setdefault(uid, deque(maxlen=6))
     MEMORY[uid].append(f"{role}: {text}")
@@ -138,47 +138,52 @@ async def ask_gemini(uid, text, mode="normal"):
     remember(uid, "user", text)
     history_text = "\n".join(MEMORY[uid])
     
-    style = "You are a helpful assistant."
+    # SYSTEM INSTRUCTION (Prepended to text for stability)
+    sys_instruction = "You are a helpful assistant."
     if mode == "boss":
-        style = "You are respectful but confident. Reply in Hinglish/English. Tone: Professional."
+        sys_instruction = "You are respectful but confident. Reply in Hinglish/English. Tone: Professional."
     elif mode == "respect":
-        style = "You are extremely polite and obedient. Reply in Hinglish/English. Tone: Soft."
+        sys_instruction = "You are extremely polite and obedient. Reply in Hinglish/English. Tone: Soft."
     elif mode == "short":
         if RUDE_MODE:
-            style = "You are a witty, savage roaster. Reply in Hindi/Hinglish. Max 2 lines. No vulgarity."
+            sys_instruction = "You are a witty, savage roaster. Reply in Hindi/Hinglish. Max 2 lines. No vulgarity."
         else:
-            style = "You are polite and concise. Reply in Hinglish/English. Max 2 lines."
+            sys_instruction = "You are polite and concise. Reply in Hinglish/English. Max 2 lines."
 
-    max_retries = 2
-    # Try Flash first, then Pro
-    models_to_try = ["gemini-1.5-flash", "gemini-pro"]
-    
-    for model_name in models_to_try:
-        for attempt in range(max_retries):
-            try:
-                model = genai.GenerativeModel(model_name, system_instruction=style)
-                response = await model.generate_content_async(history_text, safety_settings=SAFETY_SETTINGS)
-                reply = response.text.strip()
-                remember(uid, "assistant", reply)
-                return reply
-            except Exception as e:
-                error_msg = str(e)
-                if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                    logging.warning(f"⚠️ API Busy. Retrying...")
-                    await asyncio.sleep(2)
-                elif "404" in error_msg or "not found" in error_msg:
-                    # Break loop to try next model
-                    break 
-                else:
-                    logging.error(f"Gemini Error ({model_name}): {error_msg}")
-                    return "⚠️ AI Error."
-    
-    return "⚠️ AI Unavailable."
+    # Combine instruction with history for older model compatibility
+    full_prompt = f"System: {sys_instruction}\nConversation:\n{history_text}"
+
+    try:
+        # ✅ TRY 1: Flash Model (Standard)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = await model.generate_content_async(full_prompt, safety_settings=SAFETY_SETTINGS)
+        reply = response.text.strip()
+        remember(uid, "assistant", reply)
+        return reply
+    except Exception as e1:
+        # ✅ TRY 2: Pro Model (Fallback)
+        try:
+            logging.warning(f"Flash failed, trying Pro... Error: {e1}")
+            model = genai.GenerativeModel("gemini-pro")
+            response = await model.generate_content_async(full_prompt, safety_settings=SAFETY_SETTINGS)
+            reply = response.text.strip()
+            remember(uid, "assistant", reply)
+            return reply
+        except Exception as e2:
+            # 🛑 CRITICAL: Return the ACTUAL error to the user so we can see it
+            error_msg = str(e2)
+            logging.error(f"ALL AI MODELS FAILED. Error: {error_msg}")
+            
+            if "API_KEY_INVALID" in error_msg:
+                return "⚠️ API Key is invalid. Check Google Studio."
+            elif "429" in error_msg:
+                return "⚠️ Server busy (Quota exceeded). Try later."
+            else:
+                return f"⚠️ Critical AI Error: {error_msg[:100]}..."
 
 async def is_nsfw_gemini(img_bytes: bytes) -> bool:
     try:
         image = Image.open(io.BytesIO(img_bytes))
-        # Try Flash first, fallback to Pro logic if needed
         model = genai.GenerativeModel("gemini-1.5-flash")
         prompt = "Answer YES only if this contains nudity, porn, or exposed genitalia. Otherwise NO."
         response = await model.generate_content_async([prompt, image], safety_settings=SAFETY_SETTINGS)
@@ -340,7 +345,7 @@ async def chat_member_update(event: ChatMemberUpdated):
             await bot.leave_chat(event.chat.id)
             return
 
-    # Welcome Logic
+    # Welcome Logic (Strict: Must be a new join, not an unmute)
     if event.new_chat_member.status == "member":
         if event.old_chat_member.status == "restricted": return 
         
@@ -496,7 +501,7 @@ async def master_text_handler(m: aiogram_types.Message):
 
 # ================= MAIN =================
 async def main():
-    print("🚀 Merged Bot Started: Guardian + Security + Gemini AI (Stable)")
+    print("🚀 Merged Bot Started: Guardian + Security + Gemini AI (Debug Mode)")
     logging.basicConfig(level=logging.INFO)
     await dp.start_polling(bot)
 
