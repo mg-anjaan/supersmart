@@ -15,7 +15,7 @@ from google.genai import types
 from aiogram import Bot, Dispatcher, types as aiogram_types, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, ChatMemberUpdatedFilter, JOIN_TRANSITION
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
 
 # ================= CONFIGURATION =================
@@ -154,12 +154,13 @@ async def ask_gemini(uid, text, mode="normal"):
             remember(uid, "assistant", reply)
             return reply
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            error_msg = str(e)
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
                 logging.warning(f"⚠️ API Busy. Retrying {attempt+1}...")
                 await asyncio.sleep(2)
             else:
-                logging.error(f"Gemini Error: {e}")
-                return "⚠️ AI Error."
+                logging.error(f"Gemini CRASH: {error_msg}") # Log exact error
+                return f"⚠️ AI Error: {error_msg[:50]}..." # Show user partial error
     
     return "⚠️ Server is busy. Try later."
 
@@ -174,7 +175,8 @@ async def is_nsfw_gemini(img_bytes: bytes) -> bool:
             contents=[prompt, image]
         )
         return "yes" in response.text.lower()
-    except:
+    except Exception as e:
+        logging.error(f"NSFW Check Fail: {e}")
         return False
 
 async def ask_vision_gemini(img_bytes: bytes) -> str:
@@ -299,7 +301,6 @@ async def unblock_word_cmd(m: aiogram_types.Message):
     else:
         await m.reply("❌ Word not found.")
 
-# Keep /fadd and /fdel as aliases if you want, or rely on /block /unblock
 @dp.message(Command("fadd"))
 async def filter_add(m: aiogram_types.Message):
     await block_word_cmd(m)
@@ -325,10 +326,10 @@ async def list_cmd(m: aiogram_types.Message):
     if not REPLIES: return await m.reply("No custom replies set.")
     await m.reply("\n".join(f"{k} -> {v}" for k,v in REPLIES.items()))
 
-# 3. WELCOME & AUTO LEAVE
+# 3. WELCOME & AUTO LEAVE (FIXED)
 @dp.chat_member()
 async def chat_member_update(event: ChatMemberUpdated):
-    # Auto Leave
+    # Auto Leave if owner not admin
     if event.new_chat_member.user.id == bot.id:
         admins = await bot.get_chat_administrators(event.chat.id)
         if OWNER_ID not in [a.user.id for a in admins]:
@@ -336,19 +337,26 @@ async def chat_member_update(event: ChatMemberUpdated):
             await bot.leave_chat(event.chat.id)
             return
 
-    # Welcome
-    new_status = event.new_chat_member.status
-    old_status = event.old_chat_member.status
-    
-    if new_status == "member" and old_status in ("left", "kicked"):
-        user = event.new_chat_member.user
-        if not user.is_bot:
-            await bot.send_message(
-                event.chat.id,
-                f"👋 <b>Welcome, {user.first_name}!</b>\n\n"
-                f"Please read the Group Rules in the description.",
-                parse_mode=ParseMode.HTML
-            )
+    # ✅ FIXED WELCOME LOGIC
+    # Detects if user joined (member) and wasn't a member before (left/kicked/none)
+    # We ignore 'restricted' to prevent welcome on unmute.
+    if event.new_chat_member.status == "member":
+        if event.old_chat_member.status in ["left", "kicked", "restricted"] and event.old_chat_member.status != "member":
+            # If they were restricted (muted), check if they are JUST being unmuted.
+            # If they were restricted with can_send_messages=False, and now they are member... 
+            # Actually, standard unmuting usually keeps them restricted but grants permissions.
+            # Real "Joining" usually comes from LEFT or KICKED.
+            if event.old_chat_member.status == "restricted":
+                return # Skip welcome for unmutes
+            
+            user = event.new_chat_member.user
+            if not user.is_bot:
+                await bot.send_message(
+                    event.chat.id,
+                    f"👋 <b>Welcome, {user.first_name}!</b>\n\n"
+                    f"Please read the Group Rules in the description.",
+                    parse_mode=ParseMode.HTML
+                )
 
 # 4. CALLBACK (Unmute)
 @dp.callback_query(lambda c: c.data.startswith("unmute_"))
@@ -499,7 +507,7 @@ async def master_text_handler(m: aiogram_types.Message):
 
 # ================= MAIN =================
 async def main():
-    print("🚀 Merged Bot Started: Guardian + Security + Gemini AI (New SDK)")
+    print("🚀 Merged Bot Started: Guardian + Security + Gemini AI (Fixed)")
     logging.basicConfig(level=logging.INFO)
     await dp.start_polling(bot)
 
