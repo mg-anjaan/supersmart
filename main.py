@@ -1,228 +1,424 @@
-import os, re, unicodedata, asyncio, time, base64, logging
-from collections import deque, defaultdict
+import os
+import re
+import asyncio
+import logging
+import io
+import unicodedata
+import aiohttp
+from collections import defaultdict, deque
+from PIL import Image
+
+import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
-from google import genai
-from openai import OpenAI
 
-# ================= 1. CONFIG & CLIENTS =================
+# ================= CONFIGURATION =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # Changed from OPENAI_API_KEY
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
-gen_client = genai.Client(api_key=GEMINI_KEY)
-oa_client = OpenAI(api_key=OPENAI_KEY)
+if not BOT_TOKEN or not GEMINI_API_KEY:
+    raise SystemExit("❌ Error: Missing BOT_TOKEN or GEMINI_API_KEY in environment variables.")
+
+# --- Initialize Gemini ---
+genai.configure(api_key=GEMINI_API_KEY)
+
+# Safety settings: We turn off API blocking so your bot handles the logic
+SAFETY_SETTINGS = {
+    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+}
+
+# Initialize Bot
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# ================= 2. DATA STORAGE (ALL SCRIPTS) =================
-AI_ENABLED, SHORT_MODE, RUDE_MODE = True, True, False
-VISION_ENABLED, NSFW_ENABLED, LINKS_ENABLED = True, True, True
-MEMORY = {}
-REPLIES = {} # For /addreply
-ADD_REPLY_STATE = {} # Tracking state for adding replies
-BLOCKED_WORDS = set() 
-RESPECT_USERS = set()
-FILTERED_WORDS = set() # For /fadd
-_user_times = defaultdict(list) # For flood protection
+# ================= GLOBAL STATE & SETTINGS =================
+# --- Bot 3 Flags ---
+AI_ENABLED = True
+SHORT_MODE = True
+RUDE_MODE = False
+VISION_ENABLED = True
+NSFW_ENABLED = True
 
-# ================= 3. WORD LISTS & PATTERNS =================
-hindi_words = ["chutiya","madarchod","bhosdike","lund","gand","gaand","randi","behenchod","betichod","mc","bc","lodu","lavde","harami","kutte","kamina","rakhail","randwa","suar","sasura","dogla","saala","tatti","chod","gaandu","bhnchod","bkl","chodne","rundi","bhadwe","nalayak","kamine","chinal","bhand","bhen ke","loda","lode","maa ke","behn ke","choot","chut","chutmarike","chutiyapa","hijda","launda","laundiya","lavda","bevda","nashedi","raand","kutti","kuttiya","haramzada","haramzadi","bhosri","bhosriwali","rand","mehnchod"]
-english_words = ["fuck","fucking","motherfucker","bitch","asshole","slut","porn","dick","pussy","sex","boobs","cock","suck","fucker","whore","bastard","jerk","hoe","pervert","screwed","scumbag","balls","blowjob","handjob","cum","sperm","vagina","dildo","horny","bang","banging","anal","nude","nsfw","shit","damn","dumbass","retard","piss","douche","milf","boob","ass","booby","breast","naked","deepthroat","suckmy","gay","lesbian","trans","blow","spank","fetish","orgasm","wetdream","masturbate","moan","ejaculate","strip","whack","nipple","cumshot","lick","spitroast","tits","tit","hooker","escort","prostitute","blowme","wanker","screw","bollocks","bugger","slag","trollop","arse","arsehole","goddamn","shithead","horniness"]
-family_prefixes = ["teri","teri ki","tera","tera ki","teri maa","teri behen","teri gf","teri sister","teri maa ki","teri behen ki","gf","bf","mms","bana","banaa","banaya"]
-phrases = ["send nudes","horny dm","let's have sex","i am horny","want to fuck","boobs pics","let’s bang","video call nude","send pic without cloth","suck my","blow me","deep throat","show tits","open boobs","send nude","you are hot send pic","show your body","let's do sex","horny girl","horny boy","come to bed","nude video call","i want sex","let me fuck","sex chat","do sex with me","send xxx","share porn","watch porn together","send your nude"]
-IDENTITY_TRIGGERS = ["who made you", "who created you", "who owns you", "who own you", "owner kaun", "admin kaun", "who developed you", "mg kaun", "mg kaun hai", "tumhe kisne banaya", "kisne banaya"]
+# --- Bot 2 Spam/Media Data ---
+spam_counts = defaultdict(lambda: defaultdict(int))
+last_sender = defaultdict(lambda: None)
+media_group_cache = set()
+
+# --- Bot 3 AI Data ---
+MEMORY = {}
+ADD_REPLY_STATE = {}
+REPLIES = {}
+BLOCKED_WORDS_AI = set() 
+RESPECT_USERS = set()
+
+# --- Bot 1 Data ---
 USERBOT_CMD_TRIGGERS = {"raid","spam","ping","eval","exec","repeat","dox","flood","bomb"}
+
+# ================= WORD LISTS (FROM BOT 1) =================
+hindi_words = [
+    "chutiya","madarchod","bhosdike","lund","gand","gaand","randi","behenchod","betichod","mc","bc",
+    "lodu","lavde","harami","kutte","kamina","rakhail","randwa","suar","sasura","dogla","saala","tatti","chod","gaandu", "bhnchod","bkl",
+    "chodne","rundi","bhadwe","nalayak","kamine","chinal","bhand","bhen ke","loda","lode", "randi","maa ke","behn ke","gandu",
+    "chodna","choot","chut","chutmarike","chutiyapa","hijda","launda","laundiya","lavda","bevda",
+    "nashedi","raand","kutti","kuttiya","haramzada","haramzadi","bhosri","bhosriwali","rand","mehnchod"
+]
+english_words = [
+    "fuck","fucking","motherfucker","bitch","asshole","slut","porn","dick","pussy","sex","boobs","cock",
+    "suck","fucker","whore","bastard","jerk","hoe","pervert","screwed","scumbag","balls","blowjob",
+    "handjob","cum","sperm","vagina","dildo","horny","bang","banging","anal","nude","nsfw","shit","damn",
+    "dumbass","retard","piss","douche","milf","boob","ass","booby","breast","naked","deepthroat","suckmy",
+    "gay","lesbian","trans","blow","spank","fetish","orgasm","wetdream","masturbate","moan","ejaculate",
+    "strip","whack","nipple","cumshot","lick","spitroast","tits","tit","hooker","escort","prostitute",
+    "blowme","wanker","screw","bollocks","bugger","slag","trollop","arse","arsehole","goddamn",
+    "shithead","horniness"
+]
+family_prefixes = [
+    "teri","teri ki","tera","tera ki","teri maa","teri behen","teri gf","teri sister",
+    "teri maa ki","teri behen ki","gf","bf","mms","bana","banaa","banaya"
+]
+phrases = [
+    "send nudes","horny dm","let's have sex","i am horny","want to fuck",
+    "boobs pics","let’s bang","video call nude","send pic without cloth",
+    "suck my","blow me","deep throat","show tits","open boobs","send nude",
+    "you are hot send pic","show your body","let's do sex","horny girl","horny boy",
+    "come to bed","nude video call","i want sex","let me fuck","sex chat","do sex with me",
+    "send xxx","share porn","watch porn together","send your nude"
+]
+
+# ================= UTILITY FUNCTIONS =================
 
 def normalize_text(s: str) -> str:
     if not s: return ""
     s = unicodedata.normalize("NFKD", s)
-    s = re.sub(r'[\u0300-\u036f]+', "", s)
+    s = re.sub(r'[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff]+', "", s)
     s = re.sub(r"[^a-z0-9\s]", " ", s.lower())
-    return re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 def build_pattern(words):
-    fragments = [re.escape(w).replace(r"\ ", r"[\W_]*") for w in words if w.strip()]
-    return re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(fragments) + r")(?![A-Za-z0-9])", re.IGNORECASE)
+    escaped = [re.escape(w) for w in words]
+    pattern = r"(?<![A-Za-z0-9])(?:" + "|".join(escaped) + r")(?![A-Za-z0-9])"
+    return re.compile(pattern, re.IGNORECASE | re.UNICODE)
 
-abuse_pattern = build_pattern(hindi_words + english_words + phrases + [f"{p} {c}" for p in family_prefixes for c in (hindi_words + english_words)])
+combined_words = hindi_words + english_words
+combo_words = [f"{p} {c}" for p in family_prefixes for c in combined_words]
+final_word_list = combined_words + phrases + combo_words
+ABUSE_PATTERN = build_pattern(final_word_list)
 
-async def is_admin(m):
-    if m.from_user.id == OWNER_ID: return True
-    try:
-        member = await m.chat.get_member(m.from_user.id)
-        return member.status in ("administrator", "creator")
-    except: return False
+LINK_PATTERN = re.compile(
+    r"(https?://|www\.|t\.me/|telegram\.me/|(?:\s|^)[a-zA-Z0-9_-]+\.(?:com|in|org|net|info|co|xyz|io)(?:\s|$))",
+    re.IGNORECASE
+)
 
-# ================= 4. CORE LOGIC (DUAL AI) =================
-async def get_ai_reply(uid, text, mode):
+# --- Gemini Logic (Replaced OpenAI) ---
+def remember(uid, role, text):
     MEMORY.setdefault(uid, deque(maxlen=6))
-    MEMORY[uid].append(f"user: {text}")
-    context = "\n".join(MEMORY[uid])
-    styles = {
-        "boss": "You are the Boss's AI. Be respectful, calm, and confident. Use Hinglish if needed.",
-        "respect": "User is a priority. Be extremely polite. Address as Madam.",
-        "short": f"Witty/Sharp roast if RUDE_MODE={RUDE_MODE}. Max 2 lines.",
-        "long": "Detailed and helpful response."
-    }
-    sys_prompt = styles.get(mode, styles["long"])
-    try:
-        if mode in ["boss", "short"]:
-            res = oa_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": context}])
-            reply = res.choices[0].message.content.strip()
-        else:
-            res = gen_client.models.generate_content(model="gemini-2.0-flash-lite", config={"system_instruction": sys_prompt}, contents=context)
-            reply = res.text.strip()
-        MEMORY[uid].append(f"assistant: {reply}")
-        return reply
-    except: return "⚠️ API Busy."
+    MEMORY[uid].append(f"{role}: {text}")
 
-# ================= 5. ALL COMMAND HANDLERS =================
+async def ask_gemini(uid, text, mode="normal"):
+    remember(uid, "user", text)
+    
+    # Construct History Context
+    history_text = "\n".join(MEMORY[uid])
+    
+    # Define Persona
+    style = "You are a helpful assistant."
+    if mode == "boss":
+        style = "You are respectful but confident. Reply in Hinglish/English. Tone: Professional."
+    elif mode == "respect":
+        style = "You are extremely polite and obedient. Reply in Hinglish/English. Tone: Soft."
+    elif mode == "short":
+        if RUDE_MODE:
+            style = "You are a witty, savage roaster. Reply in Hindi/Hinglish. Max 2 lines. No vulgarity."
+        else:
+            style = "You are polite and concise. Reply in Hinglish/English. Max 2 lines."
+
+    try:
+        # Use Gemini 1.5 Flash (Fast & Cheap)
+        model = genai.GenerativeModel(
+            "gemini-1.5-flash",
+            system_instruction=style
+        )
+        
+        response = await model.generate_content_async(
+            history_text,
+            safety_settings=SAFETY_SETTINGS
+        )
+        
+        reply = response.text.strip()
+        remember(uid, "assistant", reply)
+        return reply
+    except Exception as e:
+        logging.error(f"Gemini Error: {e}")
+        return "⚠️ AI Error."
+
+async def is_nsfw_gemini(img_bytes: bytes) -> bool:
+    try:
+        # Load image for Gemini
+        image = Image.open(io.BytesIO(img_bytes))
+        
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        prompt = "Answer YES only if this contains nudity, porn, or exposed genitalia. Otherwise NO."
+        
+        response = await model.generate_content_async(
+            [prompt, image],
+            safety_settings=SAFETY_SETTINGS
+        )
+        return "yes" in response.text.lower()
+    except Exception as e:
+        logging.error(f"NSFW Check Error: {e}")
+        return False
+
+async def ask_vision_gemini(img_bytes: bytes) -> str:
+    try:
+        image = Image.open(io.BytesIO(img_bytes))
+        
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        prompt = "Give a casual 1-line comment on this image."
+        
+        response = await model.generate_content_async(
+            [prompt, image],
+            safety_settings=SAFETY_SETTINGS
+        )
+        return response.text.strip()
+    except Exception:
+        return ""
+
+# --- Helper Checks ---
+def is_owner(user_id):
+    return user_id == OWNER_ID
+
+async def is_admin(chat, user_id):
+    try:
+        member = await chat.get_member(user_id)
+        return member.status in ("administrator", "creator") or user_id == OWNER_ID
+    except:
+        return False
+
+# ================= HANDLERS =================
+
+# 1. COMMANDS
 @dp.message(CommandStart())
-async def start_handler(m: types.Message):
-    await m.answer("🤖 <b>MG Master Guardian</b> is active. Type /help for commands.")
+async def start_cmd(m: types.Message):
+    await m.answer(
+        f"🤖 <b>Ultimate Guardian Activated!</b>\n\n"
+        f"Hello <b>{m.from_user.first_name}</b> 👋\n"
+        "I am a fusion of Security and Intelligence.\n\n"
+        "🛡 <b>Security:</b> Anti-Abuse, Anti-Link, Anti-Spam.\n"
+        "🧠 <b>AI:</b> Gemini 1.5 Flash, Vision, Roasting.\n\n"
+        "Stay safe and have fun! 💬"
+    )
 
 @dp.message(Command("help"))
-async def help_handler(m: types.Message):
-    await m.answer("<b>Controls:</b> /ai, /short, /rude, /vision, /nsfw, /links (on/off)\n<b>Filters:</b> /fadd, /fdel, /block, /unblock\n<b>Replies:</b> /addreply, /delreply, /list\n<b>Users:</b> /respect, /unrespect")
+async def help_cmd(m: types.Message):
+    await m.answer(
+        "<b>🛠 Command List:</b>\n\n"
+        "<b>AI Controls:</b>\n"
+        "/ai on/off - Toggle AI\n"
+        "/rude on/off - Toggle Roast Mode\n"
+        "/vision on/off - Toggle Photo Vision\n"
+        "/nsfw on/off - Toggle NSFW Protection\n\n"
+        "<b>Custom Replies:</b>\n"
+        "/addreply - Add custom response\n"
+        "/list - List responses\n\n"
+        "<b>Admin Tools:</b>\n"
+        "/fadd [word] - Add blocked word (AI)\n"
+        "<i>...plus auto-moderation is always active!</i>"
+    )
+
+# 2. CONFIG COMMANDS
+@dp.message(Command("ai"))
+async def set_ai(m: types.Message):
+    global AI_ENABLED
+    if is_owner(m.from_user.id): AI_ENABLED = m.text.endswith("on"); await m.reply(f"AI: {AI_ENABLED}")
+
+@dp.message(Command("rude"))
+async def set_rude(m: types.Message):
+    global RUDE_MODE
+    if is_owner(m.from_user.id): RUDE_MODE = m.text.endswith("on"); await m.reply(f"Rude: {RUDE_MODE}")
+
+@dp.message(Command("vision"))
+async def set_vision(m: types.Message):
+    global VISION_ENABLED
+    if is_owner(m.from_user.id): VISION_ENABLED = m.text.endswith("on"); await m.reply(f"Vision: {VISION_ENABLED}")
+
+@dp.message(Command("nsfw"))
+async def set_nsfw(m: types.Message):
+    global NSFW_ENABLED
+    if is_owner(m.from_user.id): NSFW_ENABLED = m.text.endswith("on"); await m.reply(f"NSFW: {NSFW_ENABLED}")
 
 @dp.message(Command("addreply"))
 async def add_reply_cmd(m: types.Message):
-    if not await is_admin(m): return
-    ADD_REPLY_STATE[m.from_user.id] = "waiting_trigger"
-    await m.reply("Send me the word/trigger you want to set a reply for.")
+    ADD_REPLY_STATE[m.from_user.id] = {}
+    await m.reply("➡️ Send the keyword you want me to reply to.")
 
-@dp.message(Command("delreply"))
-async def del_reply_cmd(m: types.Message):
-    if not await is_admin(m): return
-    trigger = m.text.split(maxsplit=1)[1].lower() if len(m.text.split()) > 1 else None
-    if trigger in REPLIES:
-        del REPLIES[trigger]
-        await m.reply(f"✅ Deleted reply for '{trigger}'")
+@dp.message(Command("fadd"))
+async def filter_add(m: types.Message):
+    if not is_owner(m.from_user.id): return
+    word = m.text.split()[-1].lower()
+    BLOCKED_WORDS_AI.add(word)
+    await m.reply(f"🚫 Added to AI blocklist: {word}")
 
 @dp.message(Command("list"))
-async def list_replies(m: types.Message):
-    if not REPLIES: return await m.answer("No custom replies set.")
-    await m.answer("<b>Custom Replies:</b>\n" + "\n".join([f"• {k}" for k in REPLIES.keys()]))
+async def list_cmd(m: types.Message):
+    if not REPLIES: return await m.reply("No custom replies set.")
+    await m.reply("\n".join(f"{k} -> {v}" for k,v in REPLIES.items()))
 
-@dp.message(Command("fadd", "fdel", "block", "unblock"))
-async def filter_manager(m: types.Message, command: Command):
-    if not await is_admin(m): return
-    word = m.text.split(maxsplit=1)[1].lower() if len(m.text.split()) > 1 else None
-    if not word: return
-    cmd = command.command
-    if cmd == "fadd": FILTERED_WORDS.add(word)
-    elif cmd == "fdel": FILTERED_WORDS.discard(word)
-    elif cmd == "block": BLOCKED_WORDS.add(word)
-    elif cmd == "unblock": BLOCKED_WORDS.discard(word)
-    await m.reply(f"✅ Done: {cmd}")
-
-@dp.message(Command("ai", "short", "rude", "vision", "nsfw", "links"))
-async def toggles(m: types.Message, command: Command):
-    global AI_ENABLED, SHORT_MODE, RUDE_MODE, VISION_ENABLED, NSFW_ENABLED, LINKS_ENABLED
-    if not await is_admin(m): return
-    val = m.text.lower().endswith("on")
-    c = command.command
-    if c == "ai": AI_ENABLED = val
-    elif c == "short": SHORT_MODE = val
-    elif c == "rude": RUDE_MODE = val
-    elif c == "vision": VISION_ENABLED = val
-    elif c == "nsfw": NSFW_ENABLED = val
-    elif c == "links": LINKS_ENABLED = val
-    await m.reply(f"✅ {c.upper()} is {m.text.split()[-1].upper()}")
-
-@dp.message(Command("respect", "unrespect"))
-async def respect_handler(m: types.Message, command: Command):
-    if not await is_admin(m) or not m.reply_to_message: return
-    tid = m.reply_to_message.from_user.id
-    if command.command == "respect": RESPECT_USERS.add(tid)
-    else: RESPECT_USERS.discard(tid)
-    await m.reply("✅ Priority Updated.")
-
-# ================= 6. AUTOMATIC ACTIONS =================
+# 3. WELCOME & AUTO LEAVE
 @dp.chat_member()
-async def welcome_handler(event: ChatMemberUpdated):
-    if event.new_chat_member.status == "member":
-        await bot.send_message(event.chat.id, f"👋 Welcome {event.new_chat_member.user.first_name} to the group!")
+async def chat_member_update(event: ChatMemberUpdated):
+    if event.new_chat_member.user.id == bot.id:
+        admins = await bot.get_chat_administrators(event.chat.id)
+        if OWNER_ID not in [a.user.id for a in admins]:
+            await bot.send_message(event.chat.id, "❌ My owner is not admin here. Bye!")
+            await bot.leave_chat(event.chat.id)
+            return
 
+    if event.new_chat_member.status == "member" and event.old_chat_member.status in ("left", "kicked"):
+        user = event.new_chat_member.user
+        if not user.is_bot:
+            await bot.send_message(
+                event.chat.id,
+                f"👋 <b>Welcome, {user.first_name}!</b>\n\n"
+                f"Please read the Group Rules in the description.",
+                parse_mode=ParseMode.HTML
+            )
+
+# 4. CALLBACK (Unmute)
+@dp.callback_query(lambda c: c.data.startswith("unmute_"))
+async def unmute_callback(c: CallbackQuery):
+    if not await is_admin(c.message.chat, c.from_user.id):
+        return await c.answer("❌ Admins only!", show_alert=True)
+    
+    uid = int(c.data.split("_")[1])
+    try:
+        await c.message.chat.restrict(
+            uid, permissions=types.ChatPermissions(
+                can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True
+            )
+        )
+        await c.message.edit_text(f"✅ User unmuted by {c.from_user.first_name}.")
+    except:
+        await c.answer("Error unmuting.", show_alert=True)
+
+# 5. PHOTO/MEDIA HANDLER
 @dp.message(F.photo)
 async def photo_handler(m: types.Message):
-    if m.forward_origin: return
-    file = await bot.get_file(m.photo[-1].file_id)
-    img = await bot.download_file(file.file_path)
-    b64 = base64.b64encode(img.read()).decode()
-    if NSFW_ENABLED:
-        res = gen_client.models.generate_content(model="gemini-2.0-flash-lite", contents=["Is this porn? YES/NO", {"inline_data": {"mime_type": "image/jpeg", "data": b64}}])
-        if "yes" in res.text.lower():
+    if m.media_group_id:
+        if m.media_group_id in media_group_cache: return
+        media_group_cache.add(m.media_group_id)
+        asyncio.create_task(clean_cache(m.media_group_id))
+        await asyncio.sleep(1)
+
+    photo = m.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
+    
+    # Download Image
+    async with aiohttp.ClientSession() as s:
+        async with s.get(url) as r: img_bytes = await r.read()
+
+    # NSFW Check
+    if NSFW_ENABLED and await is_nsfw_gemini(img_bytes):
+        await m.delete()
+        await m.chat.restrict(m.from_user.id, permissions=types.ChatPermissions(can_send_messages=False))
+        await m.answer(f"🚫 <b>{m.from_user.first_name}</b> muted for NSFW content.")
+        return
+
+    # Vision Check
+    if VISION_ENABLED and (m.caption is None or "@" in m.caption or m.reply_to_message):
+        comment = await ask_vision_gemini(img_bytes)
+        if comment: await m.reply(comment)
+
+async def clean_cache(mid):
+    await asyncio.sleep(15)
+    media_group_cache.discard(mid)
+
+# 6. MASTER TEXT HANDLER
+@dp.message(F.text)
+async def master_text_handler(m: types.Message):
+    if m.chat.type not in ["group", "supergroup"]: return
+    
+    user = m.from_user
+    text = m.text.strip()
+    normalized_text = normalize_text(text)
+    is_adm = await is_admin(m.chat, user.id)
+    
+    state = ADD_REPLY_STATE.get(user.id)
+    if state is not None:
+        if "key" not in state:
+            state["key"] = text.lower()
+            return await m.reply("➡️ Now send the reply text.")
+        REPLIES[state["key"]] = text
+        ADD_REPLY_STATE.pop(user.id)
+        return await m.reply("✅ Reply Saved.")
+
+    if m.sender_chat and m.sender_chat.id == m.chat.id: is_adm = True
+
+    # --- SECURITY LAYER ---
+    if not is_adm:
+        if text.startswith((".", "/")):
+            cmd = text[1:].split()[0].lower()
+            if cmd in USERBOT_CMD_TRIGGERS:
+                await m.delete()
+                await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
+                return await m.answer(f"⚠️ <b>{user.first_name}</b> muted for suspicious command.")
+
+        if m.forward_origin:
             await m.delete()
-            return await m.chat.restrict(m.from_user.id, permissions=types.ChatPermissions(can_send_messages=False))
-    if VISION_ENABLED:
-        res_v = gen_client.models.generate_content(model="gemini-2.0-flash-lite", contents=["Comment on this photo.", {"inline_data": {"mime_type": "image/jpeg", "data": b64}}])
-        await m.reply(res_v.text)
+            return await m.answer(f"🚷 <b>{user.first_name}</b>, forwards not allowed.")
 
-@dp.message()
-async def master_handler(m: types.Message):
-    if not m.text or m.from_user.is_bot: return
-    uid, text, admin = m.from_user.id, m.text.lower(), await is_admin(m)
-    norm = normalize_text(text)
-
-    # State machine for /addreply
-    if uid in ADD_REPLY_STATE:
-        if ADD_REPLY_STATE[uid] == "waiting_trigger":
-            ADD_REPLY_STATE[uid] = f"waiting_resp_{text}"
-            return await m.reply(f"Trigger set to '{text}'. Now send the reply message.")
-        elif ADD_REPLY_STATE[uid].startswith("waiting_resp_"):
-            trigger = ADD_REPLY_STATE[uid].split("_")[2]
-            REPLIES[trigger] = m.text
-            del ADD_REPLY_STATE[uid]
-            return await m.reply(f"✅ Reply saved for '{trigger}'")
-
-    # Identity check
-    if any(t in text for t in IDENTITY_TRIGGERS):
-        return await m.reply("MG Anjaan Rahi made me. Wahi mere owner and admin hai")
-
-    # Custom Replies check
-    if norm in REPLIES: return await m.reply(REPLIES[norm])
-
-    # Security (Non-Admins)
-    if not admin and m.chat.type != "private":
-        # Flood protection
-        now = time.time()
-        _user_times[uid] = [t for t in _user_times[uid] if now - t < 5]
-        _user_times[uid].append(now)
-        if len(_user_times[uid]) > 4:
+        if LINK_PATTERN.search(text):
             await m.delete()
-            return await m.chat.restrict(uid, permissions=types.ChatPermissions(can_send_messages=False))
-        # Links
-        if LINKS_ENABLED and any(x in text for x in ["http", "t.me/", ".com"]):
-            return await m.delete()
-        # Abuse/Manual Filters
-        if any(w in norm for w in FILTERED_WORDS) or abuse_pattern.search(norm):
+            return await m.answer(f"🚫 <b>{user.first_name}</b>, links not allowed.")
+
+        if ABUSE_PATTERN.search(normalized_text):
             await m.delete()
-            await m.chat.restrict(uid, permissions=types.ChatPermissions(can_send_messages=False))
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔓 Unmute", callback_data=f"unmute_{uid}")]])
-            return await m.answer(f"🚫 {m.from_user.first_name} muted.", reply_markup=kb)
+            await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔓 Unmute", callback_data=f"unmute_{user.id}")]])
+            return await m.answer(f"🚫 <b>{user.first_name}</b> muted permanently for abuse.", reply_markup=kb)
 
-    # AI Brain
-    is_reply = m.reply_to_message and m.reply_to_message.from_user.id == bot.id
-    if (is_reply or m.chat.type == "private") and AI_ENABLED:
-        if any(b in norm for b in BLOCKED_WORDS): return await m.reply("Restricted topic.")
-        mode = "boss" if uid == OWNER_ID else ("respect" if uid in RESPECT_USERS else ("short" if SHORT_MODE else "long"))
-        ans = await get_ai_reply(uid, m.text, mode)
-        await m.reply(f"{'Boss, ' if uid==OWNER_ID else ('Madam, ' if uid in RESPECT_USERS else '')}{ans}")
+        prev_sender = last_sender[m.chat.id]
+        if prev_sender == user.id:
+            spam_counts[m.chat.id][user.id] += 1
+            if spam_counts[m.chat.id][user.id] >= 5:
+                await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
+                spam_counts[m.chat.id][user.id] = 0
+                return await m.answer(f"🔇 <b>{user.first_name}</b> muted for spamming.")
+        else:
+            spam_counts[m.chat.id].clear()
+            spam_counts[m.chat.id][user.id] = 1
+            last_sender[m.chat.id] = user.id
 
-@dp.callback_query(F.data.startswith("unmute_"))
-async def unmute_cb(c: CallbackQuery):
-    if not await is_admin(c): return
-    uid = int(c.data.split("_")[1])
-    await c.message.chat.restrict(uid, permissions=types.ChatPermissions(can_send_messages=True, can_send_media_messages=True))
-    await c.message.edit_text("✅ Unmuted.")
+    # --- LOGIC LAYER ---
+    if any(w in text.lower() for w in BLOCKED_WORDS_AI): return
 
+    for k, v in REPLIES.items():
+        if k in text.lower():
+            return await m.reply(v)
+
+    bot_user = await bot.get_me()
+    is_reply_to_bot = m.reply_to_message and m.reply_to_message.from_user.id == bot_user.id
+    is_mentioned = f"@{bot_user.username}" in text
+    
+    if AI_ENABLED and (is_reply_to_bot or is_mentioned):
+        mode = "boss" if is_owner(user.id) else ("short" if SHORT_MODE else "normal")
+        response = await ask_gemini(user.id, text, mode)
+        await m.reply(response)
+
+# ================= MAIN =================
 async def main():
+    print("🚀 Merged Bot Started: Guardian + Security + Gemini AI")
+    logging.basicConfig(level=logging.INFO)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
