@@ -5,18 +5,23 @@ import logging
 import io
 import unicodedata
 import aiohttp
+import warnings
 from collections import defaultdict, deque
 from PIL import Image
 
-# ✅ NEW LIBRARY IMPORT (Google GenAI SDK)
-from google import genai
-from google.genai import types
+# ✅ SWITCH BACK TO STABLE LIBRARY
+import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 from aiogram import Bot, Dispatcher, types as aiogram_types, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandStart, ChatMemberUpdatedFilter, JOIN_TRANSITION
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
+
+# 🔇 Suppress Google Deprecation Warnings (Keeps logs clean)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # ================= CONFIGURATION =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -26,8 +31,16 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 if not BOT_TOKEN or not GEMINI_API_KEY:
     raise SystemExit("❌ Error: Missing BOT_TOKEN or GEMINI_API_KEY in environment variables.")
 
-# ✅ Initialize NEW Gemini Client
-client = genai.Client(api_key=GEMINI_API_KEY)
+# ✅ Initialize Gemini (Stable)
+genai.configure(api_key=GEMINI_API_KEY)
+
+# Safety settings: We turn off API blocking so your bot handles the logic
+SAFETY_SETTINGS = {
+    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+}
 
 # Initialize Bot
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -113,7 +126,7 @@ LINK_PATTERN = re.compile(
 def get_unmute_kb(user_id):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔓 Unmute User", callback_data=f"unmute_{user_id}")]])
 
-# --- Gemini Logic (NEW SDK) ---
+# --- Gemini Logic (Stable SDK) ---
 def remember(uid, role, text):
     MEMORY.setdefault(uid, deque(maxlen=6))
     MEMORY[uid].append(f"{role}: {text}")
@@ -136,20 +149,9 @@ async def ask_gemini(uid, text, mode="normal"):
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            # ✅ NEW SYNTAX: client.aio.models.generate_content
-            response = await client.aio.models.generate_content(
-                model='gemini-1.5-flash',
-                contents=[history_text],
-                config=types.GenerateContentConfig(
-                    system_instruction=style,
-                    safety_settings=[
-                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-                    ]
-                )
-            )
+            # ✅ STABLE SYNTAX
+            model = genai.GenerativeModel("gemini-1.5-flash", system_instruction=style)
+            response = await model.generate_content_async(history_text, safety_settings=SAFETY_SETTINGS)
             reply = response.text.strip()
             remember(uid, "assistant", reply)
             return reply
@@ -159,21 +161,18 @@ async def ask_gemini(uid, text, mode="normal"):
                 logging.warning(f"⚠️ API Busy. Retrying {attempt+1}...")
                 await asyncio.sleep(2)
             else:
-                logging.error(f"Gemini CRASH: {error_msg}") # Log exact error
-                return f"⚠️ AI Error: {error_msg[:50]}..." # Show user partial error
+                logging.error(f"Gemini CRASH: {error_msg}")
+                return f"⚠️ AI Error: {error_msg[:30]}..."
     
     return "⚠️ Server is busy. Try later."
 
 async def is_nsfw_gemini(img_bytes: bytes) -> bool:
     try:
         image = Image.open(io.BytesIO(img_bytes))
+        # ✅ STABLE SYNTAX
+        model = genai.GenerativeModel("gemini-1.5-flash")
         prompt = "Answer YES only if this contains nudity, porn, or exposed genitalia. Otherwise NO."
-        
-        # ✅ NEW SYNTAX for Image
-        response = await client.aio.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=[prompt, image]
-        )
+        response = await model.generate_content_async([prompt, image], safety_settings=SAFETY_SETTINGS)
         return "yes" in response.text.lower()
     except Exception as e:
         logging.error(f"NSFW Check Fail: {e}")
@@ -182,13 +181,10 @@ async def is_nsfw_gemini(img_bytes: bytes) -> bool:
 async def ask_vision_gemini(img_bytes: bytes) -> str:
     try:
         image = Image.open(io.BytesIO(img_bytes))
+        # ✅ STABLE SYNTAX
+        model = genai.GenerativeModel("gemini-1.5-flash")
         prompt = "Give a casual 1-line comment on this image."
-        
-        # ✅ NEW SYNTAX for Image
-        response = await client.aio.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=[prompt, image]
-        )
+        response = await model.generate_content_async([prompt, image], safety_settings=SAFETY_SETTINGS)
         return response.text.strip()
     except:
         return ""
@@ -214,7 +210,7 @@ async def start_cmd(m: aiogram_types.Message):
         f"Hello <b>{m.from_user.first_name}</b> 👋\n"
         "I am a fusion of Security and Intelligence.\n\n"
         "🛡 <b>Security:</b> Anti-Abuse, Anti-Link, Anti-Spam, Anti-Raid.\n"
-        "🧠 <b>AI:</b> Gemini 1.5 Flash (New SDK), Vision, Roasting.\n\n"
+        "🧠 <b>AI:</b> Gemini 1.5 Flash (Stable), Vision, Roasting.\n\n"
         "Stay safe and have fun! 💬"
     )
 
@@ -326,7 +322,7 @@ async def list_cmd(m: aiogram_types.Message):
     if not REPLIES: return await m.reply("No custom replies set.")
     await m.reply("\n".join(f"{k} -> {v}" for k,v in REPLIES.items()))
 
-# 3. WELCOME & AUTO LEAVE (FIXED)
+# 3. WELCOME & AUTO LEAVE
 @dp.chat_member()
 async def chat_member_update(event: ChatMemberUpdated):
     # Auto Leave if owner not admin
@@ -337,26 +333,20 @@ async def chat_member_update(event: ChatMemberUpdated):
             await bot.leave_chat(event.chat.id)
             return
 
-    # ✅ FIXED WELCOME LOGIC
-    # Detects if user joined (member) and wasn't a member before (left/kicked/none)
-    # We ignore 'restricted' to prevent welcome on unmute.
+    # Welcome Logic (Simplified)
     if event.new_chat_member.status == "member":
-        if event.old_chat_member.status in ["left", "kicked", "restricted"] and event.old_chat_member.status != "member":
-            # If they were restricted (muted), check if they are JUST being unmuted.
-            # If they were restricted with can_send_messages=False, and now they are member... 
-            # Actually, standard unmuting usually keeps them restricted but grants permissions.
-            # Real "Joining" usually comes from LEFT or KICKED.
-            if event.old_chat_member.status == "restricted":
-                return # Skip welcome for unmutes
-            
-            user = event.new_chat_member.user
-            if not user.is_bot:
-                await bot.send_message(
-                    event.chat.id,
-                    f"👋 <b>Welcome, {user.first_name}!</b>\n\n"
-                    f"Please read the Group Rules in the description.",
-                    parse_mode=ParseMode.HTML
-                )
+        # Don't welcome if they were restricted (muted) -> member (unmuted)
+        if event.old_chat_member.status == "restricted":
+            return 
+        
+        user = event.new_chat_member.user
+        if not user.is_bot:
+            await bot.send_message(
+                event.chat.id,
+                f"👋 <b>Welcome, {user.first_name}!</b>\n\n"
+                f"Please read the Group Rules in the description.",
+                parse_mode=ParseMode.HTML
+            )
 
 # 4. CALLBACK (Unmute)
 @dp.callback_query(lambda c: c.data.startswith("unmute_"))
@@ -507,7 +497,7 @@ async def master_text_handler(m: aiogram_types.Message):
 
 # ================= MAIN =================
 async def main():
-    print("🚀 Merged Bot Started: Guardian + Security + Gemini AI (Fixed)")
+    print("🚀 Merged Bot Started: Guardian + Security + Gemini AI (Stable)")
     logging.basicConfig(level=logging.INFO)
     await dp.start_polling(bot)
 
