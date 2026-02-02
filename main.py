@@ -268,6 +268,47 @@ async def filter_add(m: types.Message):
     BLOCKED_WORDS_AI.add(word)
     await m.reply(f"🚫 Added to AI blocklist: {word}")
 
+@dp.message(Command("delreply"))
+async def del_reply_cmd(m: types.Message):
+    # Deletes a custom reply
+    if not REPLIES:
+        return await m.reply("❌ No replies to delete.")
+    
+    key = m.text.split(maxsplit=1)[-1].lower()
+    if key in REPLIES:
+        REPLIES.pop(key)
+        await m.reply(f"🗑 Deleted reply for: <b>{key}</b>")
+    else:
+        await m.reply("❌ Key not found.")
+
+@dp.message(Command("fdel"))
+async def filter_del(m: types.Message):
+    # Removes a word from AI blocklist
+    if not is_owner(m.from_user.id): return
+    if len(m.text.split()) < 2:
+        return await m.reply("Usage: /fdel [word]")
+    
+    word = m.text.split()[-1].lower()
+    if word in BLOCKED_WORDS_AI:
+        BLOCKED_WORDS_AI.discard(word)
+        await m.reply(f"✅ Removed from blocklist: {word}")
+    else:
+        await m.reply("❌ Word not found in blocklist.")
+
+@dp.message(Command("respect"))
+async def respect_on(m: types.Message):
+    # Treats the replied user with extreme politeness
+    if is_owner(m.from_user.id) and m.reply_to_message:
+        RESPECT_USERS.add(m.reply_to_message.from_user.id)
+        await m.reply("✅ Respect Mode ON for this user.")
+
+@dp.message(Command("unrespect"))
+async def respect_off(m: types.Message):
+    # Turns off respect mode
+    if is_owner(m.from_user.id) and m.reply_to_message:
+        RESPECT_USERS.discard(m.reply_to_message.from_user.id)
+        await m.reply("❌ Respect Mode OFF.")
+
 @dp.message(Command("list"))
 async def list_cmd(m: types.Message):
     if not REPLIES: return await m.reply("No custom replies set.")
