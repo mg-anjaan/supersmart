@@ -5,23 +5,18 @@ import logging
 import io
 import unicodedata
 import aiohttp
-import warnings
 from collections import defaultdict, deque
 from PIL import Image
 
-# ✅ STABLE GOOGLE LIBRARY
-import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
+# ✅ NEW GOOGLE LIBRARY (Fixes 404 Error)
+from google import genai
+from google.genai import types
 
 from aiogram import Bot, Dispatcher, types as aiogram_types, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import Command, CommandStart, ChatMemberUpdatedFilter, JOIN_TRANSITION
+from aiogram.filters import Command, CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
-
-# 🔇 Suppress Warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=UserWarning)
 
 # ================= CONFIGURATION =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -31,16 +26,8 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 if not BOT_TOKEN or not GEMINI_API_KEY:
     raise SystemExit("❌ Error: Missing BOT_TOKEN or GEMINI_API_KEY in environment variables.")
 
-# ✅ Initialize Gemini
-genai.configure(api_key=GEMINI_API_KEY)
-
-# Safety settings: Turn off blocking
-SAFETY_SETTINGS = {
-    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-}
+# ✅ Initialize NEW Client
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Initialize Bot
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -107,7 +94,6 @@ def normalize_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-# Smart Pattern Builder
 def tolerant_pattern(word):
     return r"[\W_]*".join(re.escape(c) for c in word)
 
@@ -129,7 +115,7 @@ LINK_PATTERN = re.compile(
 def get_unmute_kb(user_id):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔓 Unmute User", callback_data=f"unmute_{user_id}")]])
 
-# --- Gemini Logic (DEBUG MODE) ---
+# --- Gemini Logic (NEW SDK) ---
 def remember(uid, role, text):
     MEMORY.setdefault(uid, deque(maxlen=6))
     MEMORY[uid].append(f"{role}: {text}")
@@ -138,65 +124,62 @@ async def ask_gemini(uid, text, mode="normal"):
     remember(uid, "user", text)
     history_text = "\n".join(MEMORY[uid])
     
-    # SYSTEM INSTRUCTION (Prepended to text for stability)
-    sys_instruction = "You are a helpful assistant."
+    style = "You are a helpful assistant."
     if mode == "boss":
-        sys_instruction = "You are respectful but confident. Reply in Hinglish/English. Tone: Professional."
+        style = "You are respectful but confident. Reply in Hinglish/English. Tone: Professional."
     elif mode == "respect":
-        sys_instruction = "You are extremely polite and obedient. Reply in Hinglish/English. Tone: Soft."
+        style = "You are extremely polite and obedient. Reply in Hinglish/English. Tone: Soft."
     elif mode == "short":
         if RUDE_MODE:
-            sys_instruction = "You are a witty, savage roaster. Reply in Hindi/Hinglish. Max 2 lines. No vulgarity."
+            style = "You are a witty, savage roaster. Reply in Hindi/Hinglish. Max 2 lines. No vulgarity."
         else:
-            sys_instruction = "You are polite and concise. Reply in Hinglish/English. Max 2 lines."
+            style = "You are polite and concise. Reply in Hinglish/English. Max 2 lines."
 
-    # Combine instruction with history for older model compatibility
-    full_prompt = f"System: {sys_instruction}\nConversation:\n{history_text}"
+    # Combine for stability
+    full_prompt = f"System: {style}\nConversation:\n{history_text}"
 
-    try:
-        # ✅ TRY 1: Flash Model (Standard)
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        response = await model.generate_content_async(full_prompt, safety_settings=SAFETY_SETTINGS)
-        reply = response.text.strip()
-        remember(uid, "assistant", reply)
-        return reply
-    except Exception as e1:
-        # ✅ TRY 2: Pro Model (Fallback)
+    max_retries = 2
+    for attempt in range(max_retries):
         try:
-            logging.warning(f"Flash failed, trying Pro... Error: {e1}")
-            model = genai.GenerativeModel("gemini-pro")
-            response = await model.generate_content_async(full_prompt, safety_settings=SAFETY_SETTINGS)
+            # ✅ NEW SDK SYNTAX
+            response = await client.aio.models.generate_content(
+                model='gemini-1.5-flash',
+                contents=[full_prompt]
+            )
             reply = response.text.strip()
             remember(uid, "assistant", reply)
             return reply
-        except Exception as e2:
-            # 🛑 CRITICAL: Return the ACTUAL error to the user so we can see it
-            error_msg = str(e2)
-            logging.error(f"ALL AI MODELS FAILED. Error: {error_msg}")
-            
-            if "API_KEY_INVALID" in error_msg:
-                return "⚠️ API Key is invalid. Check Google Studio."
-            elif "429" in error_msg:
-                return "⚠️ Server busy (Quota exceeded). Try later."
+        except Exception as e:
+            error_msg = str(e)
+            if "429" in error_msg:
+                await asyncio.sleep(2)
             else:
-                return f"⚠️ Critical AI Error: {error_msg[:100]}..."
+                logging.error(f"Gemini Error: {error_msg}")
+                return f"⚠️ AI Error: {error_msg[:50]}..."
+    
+    return "⚠️ Server is busy."
 
 async def is_nsfw_gemini(img_bytes: bytes) -> bool:
     try:
         image = Image.open(io.BytesIO(img_bytes))
-        model = genai.GenerativeModel("gemini-1.5-flash")
         prompt = "Answer YES only if this contains nudity, porn, or exposed genitalia. Otherwise NO."
-        response = await model.generate_content_async([prompt, image], safety_settings=SAFETY_SETTINGS)
+        response = await client.aio.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=[prompt, image]
+        )
         return "yes" in response.text.lower()
-    except:
+    except Exception as e:
+        logging.error(f"NSFW Check Fail: {e}")
         return False
 
 async def ask_vision_gemini(img_bytes: bytes) -> str:
     try:
         image = Image.open(io.BytesIO(img_bytes))
-        model = genai.GenerativeModel("gemini-1.5-flash")
         prompt = "Give a casual 1-line comment on this image."
-        response = await model.generate_content_async([prompt, image], safety_settings=SAFETY_SETTINGS)
+        response = await client.aio.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=[prompt, image]
+        )
         return response.text.strip()
     except:
         return ""
@@ -292,7 +275,6 @@ async def del_reply_cmd(m: aiogram_types.Message):
 async def block_word_cmd(m: aiogram_types.Message):
     if not is_owner(m.from_user.id): return
     if len(m.text.split()) < 2: return await m.reply("Usage: /block word")
-    
     word = m.text.split()[-1].lower()
     BLOCKED_WORDS_AI.add(word)
     await m.reply(f"🚫 Blocked word: <b>{word}</b>")
@@ -301,7 +283,6 @@ async def block_word_cmd(m: aiogram_types.Message):
 async def unblock_word_cmd(m: aiogram_types.Message):
     if not is_owner(m.from_user.id): return
     if len(m.text.split()) < 2: return await m.reply("Usage: /unblock word")
-    
     word = m.text.split()[-1].lower()
     if word in BLOCKED_WORDS_AI:
         BLOCKED_WORDS_AI.discard(word)
@@ -334,10 +315,9 @@ async def list_cmd(m: aiogram_types.Message):
     if not REPLIES: return await m.reply("No custom replies set.")
     await m.reply("\n".join(f"{k} -> {v}" for k,v in REPLIES.items()))
 
-# 3. WELCOME & AUTO LEAVE (FIXED)
+# 3. WELCOME & AUTO LEAVE
 @dp.chat_member()
 async def chat_member_update(event: ChatMemberUpdated):
-    # Auto Leave if owner not admin
     if event.new_chat_member.user.id == bot.id:
         admins = await bot.get_chat_administrators(event.chat.id)
         if OWNER_ID not in [a.user.id for a in admins]:
@@ -345,10 +325,8 @@ async def chat_member_update(event: ChatMemberUpdated):
             await bot.leave_chat(event.chat.id)
             return
 
-    # Welcome Logic (Strict: Must be a new join, not an unmute)
     if event.new_chat_member.status == "member":
         if event.old_chat_member.status == "restricted": return 
-        
         user = event.new_chat_member.user
         if not user.is_bot:
             await bot.send_message(
@@ -358,12 +336,11 @@ async def chat_member_update(event: ChatMemberUpdated):
                 parse_mode=ParseMode.HTML
             )
 
-# 4. CALLBACK (Unmute)
+# 4. CALLBACK
 @dp.callback_query(lambda c: c.data.startswith("unmute_"))
 async def unmute_callback(c: CallbackQuery):
     if not await is_admin(c.message.chat, c.from_user.id):
         return await c.answer("❌ Admins only!", show_alert=True)
-    
     uid = int(c.data.split("_")[1])
     try:
         await c.message.chat.restrict(
@@ -375,7 +352,7 @@ async def unmute_callback(c: CallbackQuery):
     except:
         await c.answer("Error unmuting.", show_alert=True)
 
-# 5. PHOTO/MEDIA HANDLER (With Security Logic)
+# 5. PHOTO HANDLER
 @dp.message(F.photo)
 async def photo_handler(m: aiogram_types.Message):
     if m.chat.type in ["group", "supergroup"]:
@@ -400,7 +377,6 @@ async def photo_handler(m: aiogram_types.Message):
     async with aiohttp.ClientSession() as s:
         async with s.get(url) as r: img_bytes = await r.read()
 
-    # NSFW Check
     if NSFW_ENABLED and await is_nsfw_gemini(img_bytes):
         await m.delete()
         await m.chat.restrict(m.from_user.id, permissions=aiogram_types.ChatPermissions(can_send_messages=False))
@@ -410,7 +386,6 @@ async def photo_handler(m: aiogram_types.Message):
         )
         return
 
-    # Vision Check
     if VISION_ENABLED and (m.caption is None or "@" in m.caption or m.reply_to_message):
         comment = await ask_vision_gemini(img_bytes)
         if comment: await m.reply(comment)
@@ -419,14 +394,13 @@ async def clean_cache(mid):
     await asyncio.sleep(15)
     media_group_cache.discard(mid)
 
-# 6. MASTER TEXT HANDLER
+# 6. TEXT HANDLER
 @dp.message(F.text)
 async def master_text_handler(m: aiogram_types.Message):
     if m.chat.type not in ["group", "supergroup"]: return
     
     user = m.from_user
     text = m.text.strip()
-    normalized_text = normalize_text(text)
     is_adm = await is_admin(m.chat, user.id)
     
     state = ADD_REPLY_STATE.get(user.id)
@@ -440,7 +414,6 @@ async def master_text_handler(m: aiogram_types.Message):
 
     if m.sender_chat and m.sender_chat.id == m.chat.id: is_adm = True
 
-    # --- SECURITY LAYER ---
     if not is_adm:
         if text.startswith((".", "/")):
             cmd = text[1:].split()[0].lower()
@@ -483,7 +456,6 @@ async def master_text_handler(m: aiogram_types.Message):
             spam_counts[m.chat.id][user.id] = 1
             last_sender[m.chat.id] = user.id
 
-    # --- LOGIC LAYER ---
     if any(w in text.lower() for w in BLOCKED_WORDS_AI): return
 
     for k, v in REPLIES.items():
@@ -499,9 +471,8 @@ async def master_text_handler(m: aiogram_types.Message):
         response = await ask_gemini(user.id, text, mode)
         await m.reply(response)
 
-# ================= MAIN =================
 async def main():
-    print("🚀 Merged Bot Started: Guardian + Security + Gemini AI (Debug Mode)")
+    print("🚀 Merged Bot Started: Guardian + Security + Gemini AI (New SDK)")
     logging.basicConfig(level=logging.INFO)
     await dp.start_polling(bot)
 
