@@ -19,7 +19,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 
 # ================= CONFIGURATION =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # Changed from OPENAI_API_KEY
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") 
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 if not BOT_TOKEN or not GEMINI_API_KEY:
@@ -61,6 +61,7 @@ BLOCKED_WORDS_AI = set()
 RESPECT_USERS = set()
 
 # --- Bot 1 Data ---
+# ✅ Userbot commands are here
 USERBOT_CMD_TRIGGERS = {"raid","spam","ping","eval","exec","repeat","dox","flood","bomb"}
 
 # ================= WORD LISTS (FROM BOT 1) =================
@@ -119,18 +120,19 @@ LINK_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# --- Gemini Logic (Replaced OpenAI) ---
+# --- Helper: Get Unmute Button ---
+def get_unmute_kb(user_id):
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔓 Unmute User", callback_data=f"unmute_{user_id}")]])
+
+# --- Gemini Logic ---
 def remember(uid, role, text):
     MEMORY.setdefault(uid, deque(maxlen=6))
     MEMORY[uid].append(f"{role}: {text}")
 
 async def ask_gemini(uid, text, mode="normal"):
     remember(uid, "user", text)
-    
-    # Construct History Context
     history_text = "\n".join(MEMORY[uid])
     
-    # Define Persona
     style = "You are a helpful assistant."
     if mode == "boss":
         style = "You are respectful but confident. Reply in Hinglish/English. Tone: Professional."
@@ -143,17 +145,9 @@ async def ask_gemini(uid, text, mode="normal"):
             style = "You are polite and concise. Reply in Hinglish/English. Max 2 lines."
 
     try:
-        # Use Gemini 1.5 Flash (Fast & Cheap)
-        model = genai.GenerativeModel(
-            "gemini-1.5-flash",
-            system_instruction=style
-        )
-        
-        response = await model.generate_content_async(
-            history_text,
-            safety_settings=SAFETY_SETTINGS
-        )
-        
+        # ✅ FIX: Uses stable gemini-1.5-flash model
+        model = genai.GenerativeModel("gemini-1.5-flash", system_instruction=style)
+        response = await model.generate_content_async(history_text, safety_settings=SAFETY_SETTINGS)
         reply = response.text.strip()
         remember(uid, "assistant", reply)
         return reply
@@ -163,16 +157,10 @@ async def ask_gemini(uid, text, mode="normal"):
 
 async def is_nsfw_gemini(img_bytes: bytes) -> bool:
     try:
-        # Load image for Gemini
         image = Image.open(io.BytesIO(img_bytes))
-        
         model = genai.GenerativeModel("gemini-1.5-flash")
         prompt = "Answer YES only if this contains nudity, porn, or exposed genitalia. Otherwise NO."
-        
-        response = await model.generate_content_async(
-            [prompt, image],
-            safety_settings=SAFETY_SETTINGS
-        )
+        response = await model.generate_content_async([prompt, image], safety_settings=SAFETY_SETTINGS)
         return "yes" in response.text.lower()
     except Exception as e:
         logging.error(f"NSFW Check Error: {e}")
@@ -181,14 +169,9 @@ async def is_nsfw_gemini(img_bytes: bytes) -> bool:
 async def ask_vision_gemini(img_bytes: bytes) -> str:
     try:
         image = Image.open(io.BytesIO(img_bytes))
-        
         model = genai.GenerativeModel("gemini-1.5-flash")
         prompt = "Give a casual 1-line comment on this image."
-        
-        response = await model.generate_content_async(
-            [prompt, image],
-            safety_settings=SAFETY_SETTINGS
-        )
+        response = await model.generate_content_async([prompt, image], safety_settings=SAFETY_SETTINGS)
         return response.text.strip()
     except Exception:
         return ""
@@ -213,7 +196,7 @@ async def start_cmd(m: types.Message):
         f"🤖 <b>Ultimate Guardian Activated!</b>\n\n"
         f"Hello <b>{m.from_user.first_name}</b> 👋\n"
         "I am a fusion of Security and Intelligence.\n\n"
-        "🛡 <b>Security:</b> Anti-Abuse, Anti-Link, Anti-Spam.\n"
+        "🛡 <b>Security:</b> Anti-Abuse, Anti-Link, Anti-Spam, Anti-Raid.\n"
         "🧠 <b>AI:</b> Gemini 1.5 Flash, Vision, Roasting.\n\n"
         "Stay safe and have fun! 💬"
     )
@@ -229,9 +212,11 @@ async def help_cmd(m: types.Message):
         "/nsfw on/off - Toggle NSFW Protection\n\n"
         "<b>Custom Replies:</b>\n"
         "/addreply - Add custom response\n"
+        "/delreply - Delete custom response\n"
         "/list - List responses\n\n"
         "<b>Admin Tools:</b>\n"
         "/fadd [word] - Add blocked word (AI)\n"
+        "/fdel [word] - Remove blocked word\n"
         "<i>...plus auto-moderation is always active!</i>"
     )
 
@@ -261,19 +246,9 @@ async def add_reply_cmd(m: types.Message):
     ADD_REPLY_STATE[m.from_user.id] = {}
     await m.reply("➡️ Send the keyword you want me to reply to.")
 
-@dp.message(Command("fadd"))
-async def filter_add(m: types.Message):
-    if not is_owner(m.from_user.id): return
-    word = m.text.split()[-1].lower()
-    BLOCKED_WORDS_AI.add(word)
-    await m.reply(f"🚫 Added to AI blocklist: {word}")
-
 @dp.message(Command("delreply"))
 async def del_reply_cmd(m: types.Message):
-    # Deletes a custom reply
-    if not REPLIES:
-        return await m.reply("❌ No replies to delete.")
-    
+    if not REPLIES: return await m.reply("❌ No replies to delete.")
     key = m.text.split(maxsplit=1)[-1].lower()
     if key in REPLIES:
         REPLIES.pop(key)
@@ -281,30 +256,31 @@ async def del_reply_cmd(m: types.Message):
     else:
         await m.reply("❌ Key not found.")
 
+@dp.message(Command("fadd"))
+async def filter_add(m: types.Message):
+    if not is_owner(m.from_user.id): return
+    word = m.text.split()[-1].lower()
+    BLOCKED_WORDS_AI.add(word)
+    await m.reply(f"🚫 Added to AI blocklist: {word}")
+
 @dp.message(Command("fdel"))
 async def filter_del(m: types.Message):
-    # Removes a word from AI blocklist
     if not is_owner(m.from_user.id): return
-    if len(m.text.split()) < 2:
-        return await m.reply("Usage: /fdel [word]")
-    
     word = m.text.split()[-1].lower()
     if word in BLOCKED_WORDS_AI:
         BLOCKED_WORDS_AI.discard(word)
         await m.reply(f"✅ Removed from blocklist: {word}")
     else:
-        await m.reply("❌ Word not found in blocklist.")
+        await m.reply("❌ Word not found.")
 
 @dp.message(Command("respect"))
 async def respect_on(m: types.Message):
-    # Treats the replied user with extreme politeness
     if is_owner(m.from_user.id) and m.reply_to_message:
         RESPECT_USERS.add(m.reply_to_message.from_user.id)
         await m.reply("✅ Respect Mode ON for this user.")
 
 @dp.message(Command("unrespect"))
 async def respect_off(m: types.Message):
-    # Turns off respect mode
     if is_owner(m.from_user.id) and m.reply_to_message:
         RESPECT_USERS.discard(m.reply_to_message.from_user.id)
         await m.reply("❌ Respect Mode OFF.")
@@ -317,6 +293,7 @@ async def list_cmd(m: types.Message):
 # 3. WELCOME & AUTO LEAVE
 @dp.chat_member()
 async def chat_member_update(event: ChatMemberUpdated):
+    # Auto Leave
     if event.new_chat_member.user.id == bot.id:
         admins = await bot.get_chat_administrators(event.chat.id)
         if OWNER_ID not in [a.user.id for a in admins]:
@@ -324,7 +301,13 @@ async def chat_member_update(event: ChatMemberUpdated):
             await bot.leave_chat(event.chat.id)
             return
 
-    if event.new_chat_member.status == "member" and event.old_chat_member.status in ("left", "kicked"):
+    # Welcome (Prevents triggering when unmuted)
+    new_status = event.new_chat_member.status
+    old_status = event.old_chat_member.status
+    
+    # ✅ FIX: Only welcome if they came from LEFT or KICKED (Banned)
+    # This prevents the welcome message when they change from RESTRICTED (Muted) -> MEMBER
+    if new_status == "member" and old_status in ("left", "kicked"):
         user = event.new_chat_member.user
         if not user.is_bot:
             await bot.send_message(
@@ -364,7 +347,6 @@ async def photo_handler(m: types.Message):
     file = await bot.get_file(photo.file_id)
     url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
     
-    # Download Image
     async with aiohttp.ClientSession() as s:
         async with s.get(url) as r: img_bytes = await r.read()
 
@@ -372,7 +354,11 @@ async def photo_handler(m: types.Message):
     if NSFW_ENABLED and await is_nsfw_gemini(img_bytes):
         await m.delete()
         await m.chat.restrict(m.from_user.id, permissions=types.ChatPermissions(can_send_messages=False))
-        await m.answer(f"🚫 <b>{m.from_user.first_name}</b> muted for NSFW content.")
+        # ✅ FIX: Added Unmute Button for NSFW Mute
+        await m.answer(
+            f"🚫 <b>{m.from_user.first_name}</b> muted for NSFW content.",
+            reply_markup=get_unmute_kb(m.from_user.id)
+        )
         return
 
     # Vision Check
@@ -407,12 +393,17 @@ async def master_text_handler(m: types.Message):
 
     # --- SECURITY LAYER ---
     if not is_adm:
+        # A. USERBOT COMMANDS (.raid, .eval etc)
         if text.startswith((".", "/")):
             cmd = text[1:].split()[0].lower()
             if cmd in USERBOT_CMD_TRIGGERS:
                 await m.delete()
                 await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
-                return await m.answer(f"⚠️ <b>{user.first_name}</b> muted for suspicious command.")
+                # ✅ FIX: Added Unmute Button
+                return await m.answer(
+                    f"⚠️ <b>{user.first_name}</b> muted for suspicious command ({cmd}).",
+                    reply_markup=get_unmute_kb(user.id)
+                )
 
         if m.forward_origin:
             await m.delete()
@@ -422,19 +413,28 @@ async def master_text_handler(m: types.Message):
             await m.delete()
             return await m.answer(f"🚫 <b>{user.first_name}</b>, links not allowed.")
 
+        # B. ABUSE DETECTOR
         if ABUSE_PATTERN.search(normalized_text):
             await m.delete()
             await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔓 Unmute", callback_data=f"unmute_{user.id}")]])
-            return await m.answer(f"🚫 <b>{user.first_name}</b> muted permanently for abuse.", reply_markup=kb)
+            # ✅ FIX: Added Unmute Button
+            return await m.answer(
+                f"🚫 <b>{user.first_name}</b> muted permanently for abuse.", 
+                reply_markup=get_unmute_kb(user.id)
+            )
 
+        # C. SPAM DETECTOR
         prev_sender = last_sender[m.chat.id]
         if prev_sender == user.id:
             spam_counts[m.chat.id][user.id] += 1
             if spam_counts[m.chat.id][user.id] >= 5:
                 await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
                 spam_counts[m.chat.id][user.id] = 0
-                return await m.answer(f"🔇 <b>{user.first_name}</b> muted for spamming.")
+                # ✅ FIX: Added Unmute Button
+                return await m.answer(
+                    f"🔇 <b>{user.first_name}</b> muted for spamming.",
+                    reply_markup=get_unmute_kb(user.id)
+                )
         else:
             spam_counts[m.chat.id].clear()
             spam_counts[m.chat.id][user.id] = 1
