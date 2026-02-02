@@ -109,16 +109,29 @@ LINK_PATTERN = re.compile(
 def get_unmute_kb(user_id):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔓 Unmute User", callback_data=f"unmute_{user_id}")]])
 
-# --- DIRECT API CALL (No SDK) ---
+# --- DIRECT API CALLS (No Google Library) ---
 def remember(uid, role, text):
     MEMORY.setdefault(uid, deque(maxlen=6))
     MEMORY[uid].append(f"{role}: {text}")
+
+async def call_gemini_api(payload, model_name="gemini-1.5-flash"):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as response:
+                result = await response.json()
+                if response.status != 200:
+                    logging.error(f"API Error ({model_name}): {result}")
+                    return None
+                return result
+    except Exception as e:
+        logging.error(f"Connection Error: {e}")
+        return None
 
 async def ask_gemini_direct(uid, text, mode="normal"):
     remember(uid, "user", text)
     history_text = "\n".join(MEMORY[uid])
     
-    # System Instruction
     sys_instruction = "You are a helpful assistant."
     if mode == "boss":
         sys_instruction = "You are respectful but confident. Reply in Hinglish/English. Tone: Professional."
@@ -130,10 +143,9 @@ async def ask_gemini_direct(uid, text, mode="normal"):
         else:
             sys_instruction = "You are polite and concise. Reply in Hinglish/English. Max 2 lines."
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    
+    # Construct Payload
     payload = {
-        "contents": [{"parts": [{"text": f"System Instruction: {sys_instruction}\n\nConversation:\n{history_text}"}]}],
+        "contents": [{"parts": [{"text": f"System: {sys_instruction}\n\nConversation:\n{history_text}"}]}],
         "safetySettings": [
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -142,30 +154,26 @@ async def ask_gemini_direct(uid, text, mode="normal"):
         ]
     }
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logging.error(f"Gemini API Error: {error_text}")
-                    return "⚠️ AI Error. Please try again."
-                
-                data = await response.json()
-                try:
-                    reply = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                    remember(uid, "assistant", reply)
-                    return reply
-                except:
-                    return "⚠️ No response from AI."
-    except Exception as e:
-        logging.error(f"Connection Error: {e}")
-        return "⚠️ Connection failed."
+    # 1. Try Flash
+    data = await call_gemini_api(payload, "gemini-1.5-flash")
+    
+    # 2. Try Pro (Fallback)
+    if not data:
+        data = await call_gemini_api(payload, "gemini-pro")
+
+    if data and "candidates" in data:
+        try:
+            reply = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            remember(uid, "assistant", reply)
+            return reply
+        except:
+            pass
+            
+    return "⚠️ AI Unavailable (API Error)."
 
 async def is_nsfw_direct(img_bytes: bytes) -> bool:
     import base64
     b64_img = base64.b64encode(img_bytes).decode('utf-8')
-    
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     
     payload = {
         "contents": [{
@@ -174,27 +182,25 @@ async def is_nsfw_direct(img_bytes: bytes) -> bool:
                 {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}
             ]
         }],
-        "safetySettings": [
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"}
-        ]
+        "safetySettings": [{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"}]
     }
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    reply = data["candidates"][0]["content"]["parts"][0]["text"].lower()
-                    return "yes" in reply
-    except:
-        pass
+    # Vision requires 'gemini-1.5-flash' or 'gemini-pro-vision'
+    data = await call_gemini_api(payload, "gemini-1.5-flash")
+    if not data:
+        data = await call_gemini_api(payload, "gemini-pro-vision")
+
+    if data and "candidates" in data:
+        try:
+            reply = data["candidates"][0]["content"]["parts"][0]["text"].lower()
+            return "yes" in reply
+        except:
+            pass
     return False
 
 async def ask_vision_direct(img_bytes: bytes) -> str:
     import base64
     b64_img = base64.b64encode(img_bytes).decode('utf-8')
-    
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     
     payload = {
         "contents": [{
@@ -205,14 +211,15 @@ async def ask_vision_direct(img_bytes: bytes) -> str:
         }]
     }
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except:
-        pass
+    data = await call_gemini_api(payload, "gemini-1.5-flash")
+    if not data:
+        data = await call_gemini_api(payload, "gemini-pro-vision")
+
+    if data and "candidates" in data:
+        try:
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except:
+            pass
     return ""
 
 # --- Helper Checks ---
