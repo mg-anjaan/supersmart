@@ -16,10 +16,10 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from aiogram import Bot, Dispatcher, types as aiogram_types, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, ChatMemberUpdatedFilter, JOIN_TRANSITION
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
 
-# 🔇 Suppress Warnings (Keeps logs clean)
+# 🔇 Suppress Warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -31,10 +31,10 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 if not BOT_TOKEN or not GEMINI_API_KEY:
     raise SystemExit("❌ Error: Missing BOT_TOKEN or GEMINI_API_KEY in environment variables.")
 
-# ✅ Initialize Gemini (Stable)
+# ✅ Initialize Gemini
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Safety settings: Turn off blocking so the bot handles the response
+# Safety settings: Turn off blocking
 SAFETY_SETTINGS = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -107,16 +107,12 @@ def normalize_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-# ✅ NEW: Smart Pattern Builder (Catches ch#t, f.u.c.k, etc.)
+# ✅ NEW: Smart Pattern Builder
 def tolerant_pattern(word):
-    # Inserts a regex for "any non-word character" between letters
-    # e.g., "chut" becomes "c[\W_]*h[\W_]*u[\W_]*t"
     return r"[\W_]*".join(re.escape(c) for c in word)
 
 def build_pattern(words):
-    # Build patterns for all words
     patterns = [tolerant_pattern(w) for w in words]
-    # Use boundaries so we don't match inside normal words
     full_regex = r"(?<![A-Za-z0-9])(?:" + "|".join(patterns) + r")(?![A-Za-z0-9])"
     return re.compile(full_regex, re.IGNORECASE | re.UNICODE)
 
@@ -130,11 +126,10 @@ LINK_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# --- Helper: Get Unmute Button ---
 def get_unmute_kb(user_id):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔓 Unmute User", callback_data=f"unmute_{user_id}")]])
 
-# --- Gemini Logic (Stable) ---
+# --- Gemini Logic (With Fallback) ---
 def remember(uid, role, text):
     MEMORY.setdefault(uid, deque(maxlen=6))
     MEMORY[uid].append(f"{role}: {text}")
@@ -154,37 +149,41 @@ async def ask_gemini(uid, text, mode="normal"):
         else:
             style = "You are polite and concise. Reply in Hinglish/English. Max 2 lines."
 
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            # ✅ STABLE SYNTAX (Uses gemini-1.5-flash)
-            model = genai.GenerativeModel("gemini-1.5-flash", system_instruction=style)
-            response = await model.generate_content_async(history_text, safety_settings=SAFETY_SETTINGS)
-            reply = response.text.strip()
-            remember(uid, "assistant", reply)
-            return reply
-        except Exception as e:
-            error_msg = str(e)
-            # Handle Retry for Rate Limits
-            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                logging.warning(f"⚠️ API Busy. Retrying {attempt+1}...")
-                await asyncio.sleep(2)
-            else:
-                # Log error but don't crash bot
-                logging.error(f"Gemini Error: {error_msg}")
-                return f"⚠️ AI Error: {error_msg[:30]}..."
+    max_retries = 2
+    # Try Flash first, then Pro
+    models_to_try = ["gemini-1.5-flash", "gemini-pro"]
     
-    return "⚠️ Server is busy. Try later."
+    for model_name in models_to_try:
+        for attempt in range(max_retries):
+            try:
+                model = genai.GenerativeModel(model_name, system_instruction=style)
+                response = await model.generate_content_async(history_text, safety_settings=SAFETY_SETTINGS)
+                reply = response.text.strip()
+                remember(uid, "assistant", reply)
+                return reply
+            except Exception as e:
+                error_msg = str(e)
+                if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                    logging.warning(f"⚠️ API Busy. Retrying...")
+                    await asyncio.sleep(2)
+                elif "404" in error_msg or "not found" in error_msg:
+                    # Break loop to try next model
+                    break 
+                else:
+                    logging.error(f"Gemini Error ({model_name}): {error_msg}")
+                    return "⚠️ AI Error."
+    
+    return "⚠️ AI Unavailable."
 
 async def is_nsfw_gemini(img_bytes: bytes) -> bool:
     try:
         image = Image.open(io.BytesIO(img_bytes))
+        # Try Flash first, fallback to Pro logic if needed
         model = genai.GenerativeModel("gemini-1.5-flash")
         prompt = "Answer YES only if this contains nudity, porn, or exposed genitalia. Otherwise NO."
         response = await model.generate_content_async([prompt, image], safety_settings=SAFETY_SETTINGS)
         return "yes" in response.text.lower()
-    except Exception as e:
-        logging.error(f"NSFW Check Fail: {e}")
+    except:
         return False
 
 async def ask_vision_gemini(img_bytes: bytes) -> str:
@@ -217,7 +216,7 @@ async def start_cmd(m: aiogram_types.Message):
         f"🤖 <b>Ultimate Guardian Activated!</b>\n\n"
         f"Hello <b>{m.from_user.first_name}</b> 👋\n"
         "I am a fusion of Security and Intelligence.\n\n"
-        "🛡 <b>Security:</b> Anti-Abuse (Smart), Anti-Link, Anti-Spam.\n"
+        "🛡 <b>Security:</b> Anti-Abuse, Anti-Link, Anti-Spam.\n"
         "🧠 <b>AI:</b> Gemini 1.5 Flash, Vision, Roasting.\n\n"
         "Stay safe and have fun! 💬"
     )
@@ -341,7 +340,7 @@ async def chat_member_update(event: ChatMemberUpdated):
             await bot.leave_chat(event.chat.id)
             return
 
-    # Welcome Logic (Strict: Must be a new join, not an unmute)
+    # Welcome Logic
     if event.new_chat_member.status == "member":
         if event.old_chat_member.status == "restricted": return 
         
@@ -374,18 +373,15 @@ async def unmute_callback(c: CallbackQuery):
 # 5. PHOTO/MEDIA HANDLER (With Security Logic)
 @dp.message(F.photo)
 async def photo_handler(m: aiogram_types.Message):
-    # --- SECURITY CHECK FOR PHOTOS/FORWARDS ---
     if m.chat.type in ["group", "supergroup"]:
         is_adm = await is_admin(m.chat, m.from_user.id)
         if m.sender_chat and m.sender_chat.id == m.chat.id: is_adm = True
         
         if not is_adm:
-            # ✅ BLOCK FORWARDED PHOTOS
             if m.forward_origin:
                 await m.delete()
                 return await m.answer(f"🚷 <b>{m.from_user.first_name}</b>, forwarded media is not allowed.")
 
-    # --- Album Logic ---
     if m.media_group_id:
         if m.media_group_id in media_group_cache: return
         media_group_cache.add(m.media_group_id)
@@ -441,7 +437,6 @@ async def master_text_handler(m: aiogram_types.Message):
 
     # --- SECURITY LAYER ---
     if not is_adm:
-        # A. USERBOT COMMANDS
         if text.startswith((".", "/")):
             cmd = text[1:].split()[0].lower()
             if cmd in USERBOT_CMD_TRIGGERS:
@@ -460,9 +455,6 @@ async def master_text_handler(m: aiogram_types.Message):
             await m.delete()
             return await m.answer(f"🚫 <b>{user.first_name}</b>, links not allowed.")
 
-        # B. ABUSE DETECTOR (New Smart Regex)
-        # Note: We use "text" for smart regex so we can see symbols. 
-        # normalized_text removes symbols, which defeats the purpose of "c#hut".
         if ABUSE_PATTERN.search(text): 
             await m.delete()
             await m.chat.restrict(user.id, permissions=aiogram_types.ChatPermissions(can_send_messages=False))
@@ -471,7 +463,6 @@ async def master_text_handler(m: aiogram_types.Message):
                 reply_markup=get_unmute_kb(user.id)
             )
 
-        # C. SPAM DETECTOR
         prev_sender = last_sender[m.chat.id]
         if prev_sender == user.id:
             spam_counts[m.chat.id][user.id] += 1
