@@ -114,7 +114,26 @@ def remember(uid, role, text):
     MEMORY.setdefault(uid, deque(maxlen=6))
     MEMORY[uid].append(f"{role}: {text}")
 
+async def list_available_models():
+    """Checks which models the API Key can actually see."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    models = [m['name'].replace('models/', '') for m in data.get('models', [])]
+                    logging.info(f"✅ AVAILABLE MODELS: {models}")
+                    return models
+                else:
+                    logging.error(f"❌ Failed to list models: {await response.text()}")
+                    return []
+    except Exception as e:
+        logging.error(f"❌ Connection Check Failed: {e}")
+        return []
+
 async def call_gemini_api(payload, model_name="gemini-1.5-flash"):
+    # Try v1beta first
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
     try:
         async with aiohttp.ClientSession() as session:
@@ -154,12 +173,16 @@ async def ask_gemini_direct(uid, text, mode="normal"):
         ]
     }
 
-    # 1. Try Flash
+    # 1. Try Flash (Fastest)
     data = await call_gemini_api(payload, "gemini-1.5-flash")
     
     # 2. Try Pro (Fallback)
     if not data:
         data = await call_gemini_api(payload, "gemini-pro")
+        
+    # 3. Try 1.0 Pro (Legacy)
+    if not data:
+        data = await call_gemini_api(payload, "gemini-1.0-pro")
 
     if data and "candidates" in data:
         try:
@@ -169,7 +192,7 @@ async def ask_gemini_direct(uid, text, mode="normal"):
         except:
             pass
             
-    return "⚠️ AI Unavailable (API Error)."
+    return "⚠️ AI Unavailable. (Check Logs for 404/400 errors)"
 
 async def is_nsfw_direct(img_bytes: bytes) -> bool:
     import base64
@@ -185,7 +208,7 @@ async def is_nsfw_direct(img_bytes: bytes) -> bool:
         "safetySettings": [{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"}]
     }
 
-    # Vision requires 'gemini-1.5-flash' or 'gemini-pro-vision'
+    # Vision requires specific models
     data = await call_gemini_api(payload, "gemini-1.5-flash")
     if not data:
         data = await call_gemini_api(payload, "gemini-pro-vision")
@@ -513,6 +536,8 @@ async def master_text_handler(m: aiogram_types.Message):
 
 async def main():
     print("🚀 Merged Bot Started: Guardian + Security + Gemini AI (Direct API)")
+    # ✅ RUN DIAGNOSTIC ON STARTUP
+    await list_available_models()
     logging.basicConfig(level=logging.INFO)
     await dp.start_polling(bot)
 
