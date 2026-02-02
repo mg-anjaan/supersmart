@@ -8,7 +8,7 @@ import aiohttp
 from collections import defaultdict, deque
 from PIL import Image
 
-# ✅ NEW LIBRARY IMPORT
+# ✅ NEW LIBRARY IMPORT (Google GenAI SDK)
 from google import genai
 from google.genai import types
 
@@ -222,6 +222,7 @@ async def help_cmd(m: aiogram_types.Message):
         "<b>🛠 Command List:</b>\n\n"
         "<b>AI Controls:</b>\n"
         "/ai on/off - Toggle AI\n"
+        "/short on/off - Toggle Short Replies\n"
         "/rude on/off - Toggle Roast Mode\n"
         "/vision on/off - Toggle Photo Vision\n"
         "/nsfw on/off - Toggle NSFW Protection\n\n"
@@ -230,9 +231,10 @@ async def help_cmd(m: aiogram_types.Message):
         "/delreply - Delete custom response\n"
         "/list - List responses\n\n"
         "<b>Admin Tools:</b>\n"
-        "/fadd [word] - Add blocked word (AI)\n"
-        "/fdel [word] - Remove blocked word\n"
-        "<i>...plus auto-moderation is always active!</i>"
+        "/block [word] - Block a word\n"
+        "/unblock [word] - Unblock a word\n"
+        "/respect - Enable Respect Mode (Reply to user)\n"
+        "/unrespect - Disable Respect Mode (Reply to user)\n"
     )
 
 # 2. CONFIG COMMANDS
@@ -241,10 +243,15 @@ async def set_ai(m: aiogram_types.Message):
     global AI_ENABLED
     if is_owner(m.from_user.id): AI_ENABLED = m.text.endswith("on"); await m.reply(f"AI: {AI_ENABLED}")
 
+@dp.message(Command("short"))
+async def set_short(m: aiogram_types.Message):
+    global SHORT_MODE
+    if is_owner(m.from_user.id): SHORT_MODE = m.text.endswith("on"); await m.reply(f"Short Mode: {SHORT_MODE}")
+
 @dp.message(Command("rude"))
 async def set_rude(m: aiogram_types.Message):
     global RUDE_MODE
-    if is_owner(m.from_user.id): RUDE_MODE = m.text.endswith("on"); await m.reply(f"Rude: {RUDE_MODE}")
+    if is_owner(m.from_user.id): RUDE_MODE = m.text.endswith("on"); await m.reply(f"Rude Mode: {RUDE_MODE}")
 
 @dp.message(Command("vision"))
 async def set_vision(m: aiogram_types.Message):
@@ -271,22 +278,35 @@ async def del_reply_cmd(m: aiogram_types.Message):
     else:
         await m.reply("❌ Key not found.")
 
-@dp.message(Command("fadd"))
-async def filter_add(m: aiogram_types.Message):
+@dp.message(Command("block"))
+async def block_word_cmd(m: aiogram_types.Message):
     if not is_owner(m.from_user.id): return
+    if len(m.text.split()) < 2: return await m.reply("Usage: /block word")
+    
     word = m.text.split()[-1].lower()
     BLOCKED_WORDS_AI.add(word)
-    await m.reply(f"🚫 Added to AI blocklist: {word}")
+    await m.reply(f"🚫 Blocked word: <b>{word}</b>")
 
-@dp.message(Command("fdel"))
-async def filter_del(m: aiogram_types.Message):
+@dp.message(Command("unblock"))
+async def unblock_word_cmd(m: aiogram_types.Message):
     if not is_owner(m.from_user.id): return
+    if len(m.text.split()) < 2: return await m.reply("Usage: /unblock word")
+    
     word = m.text.split()[-1].lower()
     if word in BLOCKED_WORDS_AI:
         BLOCKED_WORDS_AI.discard(word)
-        await m.reply(f"✅ Removed from blocklist: {word}")
+        await m.reply(f"✅ Unblocked: <b>{word}</b>")
     else:
         await m.reply("❌ Word not found.")
+
+# Keep /fadd and /fdel as aliases if you want, or rely on /block /unblock
+@dp.message(Command("fadd"))
+async def filter_add(m: aiogram_types.Message):
+    await block_word_cmd(m)
+
+@dp.message(Command("fdel"))
+async def filter_del(m: aiogram_types.Message):
+    await unblock_word_cmd(m)
 
 @dp.message(Command("respect"))
 async def respect_on(m: aiogram_types.Message):
@@ -347,9 +367,21 @@ async def unmute_callback(c: CallbackQuery):
     except:
         await c.answer("Error unmuting.", show_alert=True)
 
-# 5. PHOTO/MEDIA HANDLER
+# 5. PHOTO/MEDIA HANDLER (With Security Logic)
 @dp.message(F.photo)
 async def photo_handler(m: aiogram_types.Message):
+    # --- SECURITY CHECK FOR PHOTOS/FORWARDS ---
+    if m.chat.type in ["group", "supergroup"]:
+        is_adm = await is_admin(m.chat, m.from_user.id)
+        if m.sender_chat and m.sender_chat.id == m.chat.id: is_adm = True
+        
+        if not is_adm:
+            # ✅ BLOCK FORWARDED PHOTOS
+            if m.forward_origin:
+                await m.delete()
+                return await m.answer(f"🚷 <b>{m.from_user.first_name}</b>, forwarded media is not allowed.")
+
+    # --- Album Logic ---
     if m.media_group_id:
         if m.media_group_id in media_group_cache: return
         media_group_cache.add(m.media_group_id)
