@@ -3,19 +3,16 @@ import re
 import asyncio
 import logging
 import io
+import json
 import unicodedata
 import aiohttp
 from collections import defaultdict, deque
 from PIL import Image
 
-# ✅ NEW GOOGLE LIBRARY (Fixes 404 Error)
-from google import genai
-from google.genai import types
-
 from aiogram import Bot, Dispatcher, types as aiogram_types, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, ChatMemberUpdatedFilter, JOIN_TRANSITION
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
 
 # ================= CONFIGURATION =================
@@ -25,9 +22,6 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 if not BOT_TOKEN or not GEMINI_API_KEY:
     raise SystemExit("❌ Error: Missing BOT_TOKEN or GEMINI_API_KEY in environment variables.")
-
-# ✅ Initialize NEW Client
-client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Initialize Bot
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -115,74 +109,111 @@ LINK_PATTERN = re.compile(
 def get_unmute_kb(user_id):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔓 Unmute User", callback_data=f"unmute_{user_id}")]])
 
-# --- Gemini Logic (NEW SDK) ---
+# --- DIRECT API CALL (No SDK) ---
 def remember(uid, role, text):
     MEMORY.setdefault(uid, deque(maxlen=6))
     MEMORY[uid].append(f"{role}: {text}")
 
-async def ask_gemini(uid, text, mode="normal"):
+async def ask_gemini_direct(uid, text, mode="normal"):
     remember(uid, "user", text)
     history_text = "\n".join(MEMORY[uid])
     
-    style = "You are a helpful assistant."
+    # System Instruction
+    sys_instruction = "You are a helpful assistant."
     if mode == "boss":
-        style = "You are respectful but confident. Reply in Hinglish/English. Tone: Professional."
+        sys_instruction = "You are respectful but confident. Reply in Hinglish/English. Tone: Professional."
     elif mode == "respect":
-        style = "You are extremely polite and obedient. Reply in Hinglish/English. Tone: Soft."
+        sys_instruction = "You are extremely polite and obedient. Reply in Hinglish/English. Tone: Soft."
     elif mode == "short":
         if RUDE_MODE:
-            style = "You are a witty, savage roaster. Reply in Hindi/Hinglish. Max 2 lines. No vulgarity."
+            sys_instruction = "You are a witty, savage roaster. Reply in Hindi/Hinglish. Max 2 lines. No vulgarity."
         else:
-            style = "You are polite and concise. Reply in Hinglish/English. Max 2 lines."
+            sys_instruction = "You are polite and concise. Reply in Hinglish/English. Max 2 lines."
 
-    # Combine for stability
-    full_prompt = f"System: {style}\nConversation:\n{history_text}"
-
-    max_retries = 2
-    for attempt in range(max_retries):
-        try:
-            # ✅ NEW SDK SYNTAX
-            response = await client.aio.models.generate_content(
-                model='gemini-1.5-flash',
-                contents=[full_prompt]
-            )
-            reply = response.text.strip()
-            remember(uid, "assistant", reply)
-            return reply
-        except Exception as e:
-            error_msg = str(e)
-            if "429" in error_msg:
-                await asyncio.sleep(2)
-            else:
-                logging.error(f"Gemini Error: {error_msg}")
-                return f"⚠️ AI Error: {error_msg[:50]}..."
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     
-    return "⚠️ Server is busy."
+    payload = {
+        "contents": [{"parts": [{"text": f"System Instruction: {sys_instruction}\n\nConversation:\n{history_text}"}]}],
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+        ]
+    }
 
-async def is_nsfw_gemini(img_bytes: bytes) -> bool:
     try:
-        image = Image.open(io.BytesIO(img_bytes))
-        prompt = "Answer YES only if this contains nudity, porn, or exposed genitalia. Otherwise NO."
-        response = await client.aio.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=[prompt, image]
-        )
-        return "yes" in response.text.lower()
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logging.error(f"Gemini API Error: {error_text}")
+                    return "⚠️ AI Error. Please try again."
+                
+                data = await response.json()
+                try:
+                    reply = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    remember(uid, "assistant", reply)
+                    return reply
+                except:
+                    return "⚠️ No response from AI."
     except Exception as e:
-        logging.error(f"NSFW Check Fail: {e}")
-        return False
+        logging.error(f"Connection Error: {e}")
+        return "⚠️ Connection failed."
 
-async def ask_vision_gemini(img_bytes: bytes) -> str:
+async def is_nsfw_direct(img_bytes: bytes) -> bool:
+    import base64
+    b64_img = base64.b64encode(img_bytes).decode('utf-8')
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": "Answer YES only if this contains nudity, porn, or exposed genitalia. Otherwise NO."},
+                {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}
+            ]
+        }],
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"}
+        ]
+    }
+
     try:
-        image = Image.open(io.BytesIO(img_bytes))
-        prompt = "Give a casual 1-line comment on this image."
-        response = await client.aio.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=[prompt, image]
-        )
-        return response.text.strip()
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    reply = data["candidates"][0]["content"]["parts"][0]["text"].lower()
+                    return "yes" in reply
     except:
-        return ""
+        pass
+    return False
+
+async def ask_vision_direct(img_bytes: bytes) -> str:
+    import base64
+    b64_img = base64.b64encode(img_bytes).decode('utf-8')
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": "Give a casual 1-line comment on this image."},
+                {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}
+            ]
+        }]
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except:
+        pass
+    return ""
 
 # --- Helper Checks ---
 def is_owner(user_id):
@@ -205,7 +236,7 @@ async def start_cmd(m: aiogram_types.Message):
         f"Hello <b>{m.from_user.first_name}</b> 👋\n"
         "I am a fusion of Security and Intelligence.\n\n"
         "🛡 <b>Security:</b> Anti-Abuse, Anti-Link, Anti-Spam.\n"
-        "🧠 <b>AI:</b> Gemini 1.5 Flash, Vision, Roasting.\n\n"
+        "🧠 <b>AI:</b> Gemini 1.5 Flash (Direct API), Vision, Roasting.\n\n"
         "Stay safe and have fun! 💬"
     )
 
@@ -275,6 +306,7 @@ async def del_reply_cmd(m: aiogram_types.Message):
 async def block_word_cmd(m: aiogram_types.Message):
     if not is_owner(m.from_user.id): return
     if len(m.text.split()) < 2: return await m.reply("Usage: /block word")
+    
     word = m.text.split()[-1].lower()
     BLOCKED_WORDS_AI.add(word)
     await m.reply(f"🚫 Blocked word: <b>{word}</b>")
@@ -283,6 +315,7 @@ async def block_word_cmd(m: aiogram_types.Message):
 async def unblock_word_cmd(m: aiogram_types.Message):
     if not is_owner(m.from_user.id): return
     if len(m.text.split()) < 2: return await m.reply("Usage: /unblock word")
+    
     word = m.text.split()[-1].lower()
     if word in BLOCKED_WORDS_AI:
         BLOCKED_WORDS_AI.discard(word)
@@ -377,7 +410,7 @@ async def photo_handler(m: aiogram_types.Message):
     async with aiohttp.ClientSession() as s:
         async with s.get(url) as r: img_bytes = await r.read()
 
-    if NSFW_ENABLED and await is_nsfw_gemini(img_bytes):
+    if NSFW_ENABLED and await is_nsfw_direct(img_bytes):
         await m.delete()
         await m.chat.restrict(m.from_user.id, permissions=aiogram_types.ChatPermissions(can_send_messages=False))
         await m.answer(
@@ -387,7 +420,7 @@ async def photo_handler(m: aiogram_types.Message):
         return
 
     if VISION_ENABLED and (m.caption is None or "@" in m.caption or m.reply_to_message):
-        comment = await ask_vision_gemini(img_bytes)
+        comment = await ask_vision_direct(img_bytes)
         if comment: await m.reply(comment)
 
 async def clean_cache(mid):
@@ -468,11 +501,11 @@ async def master_text_handler(m: aiogram_types.Message):
     
     if AI_ENABLED and (is_reply_to_bot or is_mentioned):
         mode = "boss" if is_owner(user.id) else ("short" if SHORT_MODE else "normal")
-        response = await ask_gemini(user.id, text, mode)
+        response = await ask_gemini_direct(user.id, text, mode)
         await m.reply(response)
 
 async def main():
-    print("🚀 Merged Bot Started: Guardian + Security + Gemini AI (New SDK)")
+    print("🚀 Merged Bot Started: Guardian + Security + Gemini AI (Direct API)")
     logging.basicConfig(level=logging.INFO)
     await dp.start_polling(bot)
 
