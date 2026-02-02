@@ -9,17 +9,17 @@ import warnings
 from collections import defaultdict, deque
 from PIL import Image
 
-# ✅ SWITCH BACK TO STABLE LIBRARY
+# ✅ STABLE GOOGLE LIBRARY
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 from aiogram import Bot, Dispatcher, types as aiogram_types, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import Command, CommandStart, ChatMemberUpdatedFilter, JOIN_TRANSITION
+from aiogram.filters import Command, CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
 
-# 🔇 Suppress Google Deprecation Warnings (Keeps logs clean)
+# 🔇 Suppress Warnings (Keeps logs clean)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -34,7 +34,7 @@ if not BOT_TOKEN or not GEMINI_API_KEY:
 # ✅ Initialize Gemini (Stable)
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Safety settings: We turn off API blocking so your bot handles the logic
+# Safety settings: Turn off blocking so the bot handles the response
 SAFETY_SETTINGS = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -107,10 +107,18 @@ def normalize_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+# ✅ NEW: Smart Pattern Builder (Catches ch#t, f.u.c.k, etc.)
+def tolerant_pattern(word):
+    # Inserts a regex for "any non-word character" between letters
+    # e.g., "chut" becomes "c[\W_]*h[\W_]*u[\W_]*t"
+    return r"[\W_]*".join(re.escape(c) for c in word)
+
 def build_pattern(words):
-    escaped = [re.escape(w) for w in words]
-    pattern = r"(?<![A-Za-z0-9])(?:" + "|".join(escaped) + r")(?![A-Za-z0-9])"
-    return re.compile(pattern, re.IGNORECASE | re.UNICODE)
+    # Build patterns for all words
+    patterns = [tolerant_pattern(w) for w in words]
+    # Use boundaries so we don't match inside normal words
+    full_regex = r"(?<![A-Za-z0-9])(?:" + "|".join(patterns) + r")(?![A-Za-z0-9])"
+    return re.compile(full_regex, re.IGNORECASE | re.UNICODE)
 
 combined_words = hindi_words + english_words
 combo_words = [f"{p} {c}" for p in family_prefixes for c in combined_words]
@@ -126,7 +134,7 @@ LINK_PATTERN = re.compile(
 def get_unmute_kb(user_id):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔓 Unmute User", callback_data=f"unmute_{user_id}")]])
 
-# --- Gemini Logic (Stable SDK) ---
+# --- Gemini Logic (Stable) ---
 def remember(uid, role, text):
     MEMORY.setdefault(uid, deque(maxlen=6))
     MEMORY[uid].append(f"{role}: {text}")
@@ -149,7 +157,7 @@ async def ask_gemini(uid, text, mode="normal"):
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            # ✅ STABLE SYNTAX
+            # ✅ STABLE SYNTAX (Uses gemini-1.5-flash)
             model = genai.GenerativeModel("gemini-1.5-flash", system_instruction=style)
             response = await model.generate_content_async(history_text, safety_settings=SAFETY_SETTINGS)
             reply = response.text.strip()
@@ -157,11 +165,13 @@ async def ask_gemini(uid, text, mode="normal"):
             return reply
         except Exception as e:
             error_msg = str(e)
+            # Handle Retry for Rate Limits
             if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
                 logging.warning(f"⚠️ API Busy. Retrying {attempt+1}...")
                 await asyncio.sleep(2)
             else:
-                logging.error(f"Gemini CRASH: {error_msg}")
+                # Log error but don't crash bot
+                logging.error(f"Gemini Error: {error_msg}")
                 return f"⚠️ AI Error: {error_msg[:30]}..."
     
     return "⚠️ Server is busy. Try later."
@@ -169,7 +179,6 @@ async def ask_gemini(uid, text, mode="normal"):
 async def is_nsfw_gemini(img_bytes: bytes) -> bool:
     try:
         image = Image.open(io.BytesIO(img_bytes))
-        # ✅ STABLE SYNTAX
         model = genai.GenerativeModel("gemini-1.5-flash")
         prompt = "Answer YES only if this contains nudity, porn, or exposed genitalia. Otherwise NO."
         response = await model.generate_content_async([prompt, image], safety_settings=SAFETY_SETTINGS)
@@ -181,7 +190,6 @@ async def is_nsfw_gemini(img_bytes: bytes) -> bool:
 async def ask_vision_gemini(img_bytes: bytes) -> str:
     try:
         image = Image.open(io.BytesIO(img_bytes))
-        # ✅ STABLE SYNTAX
         model = genai.GenerativeModel("gemini-1.5-flash")
         prompt = "Give a casual 1-line comment on this image."
         response = await model.generate_content_async([prompt, image], safety_settings=SAFETY_SETTINGS)
@@ -209,8 +217,8 @@ async def start_cmd(m: aiogram_types.Message):
         f"🤖 <b>Ultimate Guardian Activated!</b>\n\n"
         f"Hello <b>{m.from_user.first_name}</b> 👋\n"
         "I am a fusion of Security and Intelligence.\n\n"
-        "🛡 <b>Security:</b> Anti-Abuse, Anti-Link, Anti-Spam, Anti-Raid.\n"
-        "🧠 <b>AI:</b> Gemini 1.5 Flash (Stable), Vision, Roasting.\n\n"
+        "🛡 <b>Security:</b> Anti-Abuse (Smart), Anti-Link, Anti-Spam.\n"
+        "🧠 <b>AI:</b> Gemini 1.5 Flash, Vision, Roasting.\n\n"
         "Stay safe and have fun! 💬"
     )
 
@@ -231,8 +239,8 @@ async def help_cmd(m: aiogram_types.Message):
         "<b>Admin Tools:</b>\n"
         "/block [word] - Block a word\n"
         "/unblock [word] - Unblock a word\n"
-        "/respect - Enable Respect Mode (Reply to user)\n"
-        "/unrespect - Disable Respect Mode (Reply to user)\n"
+        "/respect - Enable Respect Mode\n"
+        "/unrespect - Disable Respect Mode\n"
     )
 
 # 2. CONFIG COMMANDS
@@ -322,7 +330,7 @@ async def list_cmd(m: aiogram_types.Message):
     if not REPLIES: return await m.reply("No custom replies set.")
     await m.reply("\n".join(f"{k} -> {v}" for k,v in REPLIES.items()))
 
-# 3. WELCOME & AUTO LEAVE
+# 3. WELCOME & AUTO LEAVE (FIXED)
 @dp.chat_member()
 async def chat_member_update(event: ChatMemberUpdated):
     # Auto Leave if owner not admin
@@ -333,11 +341,9 @@ async def chat_member_update(event: ChatMemberUpdated):
             await bot.leave_chat(event.chat.id)
             return
 
-    # Welcome Logic (Simplified)
+    # Welcome Logic (Strict: Must be a new join, not an unmute)
     if event.new_chat_member.status == "member":
-        # Don't welcome if they were restricted (muted) -> member (unmuted)
-        if event.old_chat_member.status == "restricted":
-            return 
+        if event.old_chat_member.status == "restricted": return 
         
         user = event.new_chat_member.user
         if not user.is_bot:
@@ -454,8 +460,10 @@ async def master_text_handler(m: aiogram_types.Message):
             await m.delete()
             return await m.answer(f"🚫 <b>{user.first_name}</b>, links not allowed.")
 
-        # B. ABUSE DETECTOR
-        if ABUSE_PATTERN.search(normalized_text):
+        # B. ABUSE DETECTOR (New Smart Regex)
+        # Note: We use "text" for smart regex so we can see symbols. 
+        # normalized_text removes symbols, which defeats the purpose of "c#hut".
+        if ABUSE_PATTERN.search(text): 
             await m.delete()
             await m.chat.restrict(user.id, permissions=aiogram_types.ChatPermissions(can_send_messages=False))
             return await m.answer(
