@@ -39,7 +39,7 @@ CURRENT_MODEL = None
 MEMORY = {}
 ADD_REPLY_STATE = {}
 REPLIES = {}
-CUSTOM_BLOCKED_WORDS = set() # /block list (MG Restricted)
+CUSTOM_BLOCKED_WORDS = set() 
 RESPECT_USERS = set()
 
 # Security Data
@@ -133,7 +133,7 @@ async def ask_gemini(uid, text, mode="normal"):
     remember(uid, "user", text)
     history_text = "\n".join(MEMORY[uid])
 
-    # ========== HUMAN-LIKE PERSONA LOGIC ==========
+    # ========== HUMAN-LIKE PERSONA ==========
     base_prompt = (
         "You are a human-like user. "
         "Detect the user's language and reply in the EXACT SAME language/grammar. "
@@ -151,7 +151,7 @@ async def ask_gemini(uid, text, mode="normal"):
         else:
             sys = base_prompt + "Be helpful but extremely concise. Max 1-2 sentences."
     else: # Normal
-        sys = base_prompt + "Be casual, friendly, and helpful. Chat naturally."
+        sys = base_prompt + "Be casual, friendly, and helpful. Chat naturally like a friend."
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{CURRENT_MODEL}:generateContent?key={GEMINI_API_KEY}"
     payload = {"contents": [{"parts": [{"text": f"System Instruction: {sys}\nConversation History:\n{history_text}"}]}]}
@@ -177,7 +177,6 @@ async def is_nsfw_direct(img_bytes: bytes) -> bool:
     import base64
     b64_img = base64.b64encode(img_bytes).decode('utf-8')
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{CURRENT_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    
     payload = {
         "contents": [{"parts": [{"text": "Is this image Nude, Porn, or NSFW? Answer YES or NO."}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}]}],
         "safetySettings": [{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"}]
@@ -190,8 +189,7 @@ async def is_nsfw_direct(img_bytes: bytes) -> bool:
                 if data.get("candidates") and data["candidates"][0].get("finishReason") == "SAFETY": return True
                 ratings = data.get("candidates", [{}])[0].get("safetyRatings", [])
                 for r in ratings:
-                    if r["category"] == "HARM_CATEGORY_SEXUALLY_EXPLICIT" and r["probability"] in ["HIGH", "MEDIUM"]:
-                        return True
+                    if r["category"] == "HARM_CATEGORY_SEXUALLY_EXPLICIT" and r["probability"] in ["HIGH", "MEDIUM"]: return True
                 if data.get("candidates"):
                     text = data["candidates"][0]["content"]["parts"][0]["text"].lower()
                     if "yes" in text: return True
@@ -293,7 +291,6 @@ async def unblock_cmd(m):
             CUSTOM_BLOCKED_WORDS.discard(m.text.split(maxsplit=1)[-1].lower())
             await m.reply("✅ Keyword Unblocked.")
 
-# Alias commands
 @dp.message(Command("fadd"))
 async def fadd_cmd(m): await block_cmd(m)
 @dp.message(Command("fdel"))
@@ -322,14 +319,23 @@ async def unmute_cmd(m):
 async def help_cmd(m):
     await m.reply("<b>🤖 Commands:</b>\n/ai, /short, /rude, /vision, /nsfw, /respect, /addreply, /block, /mute, /unmute")
 
-# ================= EVENTS =================
+# ================= EVENTS & WELCOME (FIXED) =================
+# 1. SECURITY: Auto Leave if Owner not Admin (Status Change)
 @dp.chat_member()
 async def auto_leave(event: ChatMemberUpdated):
     if event.new_chat_member.user.id == bot.id:
         admins = await bot.get_chat_administrators(event.chat.id)
         if OWNER_ID not in [a.user.id for a in admins]: await bot.leave_chat(event.chat.id)
-    if event.new_chat_member.status == "member" and not event.new_chat_member.user.is_bot:
-        await bot.send_message(event.chat.id, f"👋 Welcome {event.new_chat_member.user.first_name}!")
+
+# 2. WELCOME: Service Message Handler (Works in Private/Public Groups)
+@dp.message(F.new_chat_members)
+async def welcome_handler(m: types.Message):
+    for user in m.new_chat_members:
+        if not user.is_bot:
+            await m.reply(
+                f"👋 <b>Welcome {user.first_name}!</b>\n"
+                f"Please read the group rules in the bio. Enjoy! ✨"
+            )
 
 @dp.callback_query(lambda c: c.data.startswith("unmute_"))
 async def on_unmute_btn(c: CallbackQuery):
@@ -345,7 +351,7 @@ async def on_unmute_btn(c: CallbackQuery):
 @dp.message(F.photo)
 async def photo_handler(m: types.Message):
     user = m.from_user
-    # Anonymous Admin Check (sender_chat) or Real Admin
+    # Admin / Anonymous Admin Check
     is_anon = m.sender_chat and m.sender_chat.id == m.chat.id
     is_adm = (user and await is_admin(m.chat, user.id)) or is_anon
 
@@ -355,12 +361,11 @@ async def photo_handler(m: types.Message):
         if user: await m.answer(f"🚷 <b>{user.first_name}</b>, Forwarded media is not allowed.")
         return
 
-    # Media Group Cache
+    # Media Cache
     if m.media_group_id:
         if m.media_group_id in media_group_cache: return
         media_group_cache.add(m.media_group_id); asyncio.create_task(clean_media_group_cache(m.media_group_id))
 
-    # Download Image for AI
     f = await bot.get_file(m.photo[-1].file_id)
     async with aiohttp.ClientSession() as s:
         async with s.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}") as r: img = await r.read()
@@ -374,7 +379,7 @@ async def photo_handler(m: types.Message):
                 await m.answer(f"🚫 <b>{user.first_name}</b> muted (NSFW Detected).", reply_markup=get_unmute_kb(user.id))
             return 
 
-    # 3. VISION CHECK (AI Response)
+    # 3. VISION CHECK (AI)
     if VISION_ENABLED and (m.caption is None or "@" in m.caption or m.reply_to_message):
         comment = await ask_vision_direct(img)
         if comment: await m.reply(comment)
@@ -385,20 +390,19 @@ async def text_handler(m: types.Message):
     user = m.from_user
     text = m.text.lower()
     
-    # Anonymous Admin Check (sender_chat) or Real Admin
+    # Admin / Anonymous Admin Check
     is_anon = m.sender_chat and m.sender_chat.id == m.chat.id
     is_adm = (user and await is_admin(m.chat, user.id)) or is_anon
 
-    # --- ADMIN / ANONYMOUS BYPASS ---
+    # --- ADMIN BYPASS ---
     if is_adm:
-        # Admins can still trigger AI if they reply to bot
         if AI_ENABLED and user and (m.reply_to_message and m.reply_to_message.from_user.id == bot.id):
              mode = "boss" if is_owner(user.id) else "normal"
              await m.reply(await ask_gemini(user.id, m.text, mode))
         return
 
-    # --- MEMBER SECURITY LAYER (BELOW) ---
-    if not user: return # Should not happen for members
+    # --- MEMBER SECURITY ---
+    if not user: return 
 
     # 1. Forward Block
     if m.forward_origin:
@@ -406,7 +410,7 @@ async def text_handler(m: types.Message):
         await m.answer(f"🚷 <b>{user.first_name}</b>, Forwarded messages are not allowed.")
         return
 
-    # 2. Add Reply Logic (Admin/Owner only usually, but safe here)
+    # 2. Add Reply Logic (Member Safe)
     if user.id in ADD_REPLY_STATE:
         if "key" not in ADD_REPLY_STATE[user.id]:
             ADD_REPLY_STATE[user.id]["key"] = text
@@ -423,7 +427,7 @@ async def text_handler(m: types.Message):
         if cmd in USERBOT_CMD_TRIGGERS:
             await safe_delete(m)
             await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
-            await m.answer(f"⚠️ <b>{user.first_name}</b> muted (Userbot Command).", reply_markup=get_unmute_kb(user.id)); return
+            await m.answer(f"⚠️ <b>{user.first_name}</b> muted (Command).", reply_markup=get_unmute_kb(user.id)); return
 
     # 4. Link Block
     if LINK_PATTERN.search(text): 
@@ -431,20 +435,20 @@ async def text_handler(m: types.Message):
         await m.answer(f"🚫 <b>{user.first_name}</b>, Links are not allowed.")
         return
 
-    # 5. Global Abuse Regex (Auto Delete + Mute)
+    # 5. Global Abuse Regex
     if ABUSE_PATTERN.search(text):
             await safe_delete(m)
             await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
             await m.answer(f"🚫 <b>{user.first_name}</b> muted. {ABUSE_BLOCK_REPLY}", reply_markup=get_unmute_kb(user.id)); return
 
-    # 6. Custom Block (/block list) (Auto Delete + Mute + MG Warn)
+    # 6. Custom Block (/block list)
     for w in CUSTOM_BLOCKED_WORDS:
         if w in text:
             await safe_delete(m)
             await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
             await m.answer(f"🚫 <b>{user.first_name}</b> muted. {CUSTOM_BLOCK_REPLY}", reply_markup=get_unmute_kb(user.id)); return
 
-    # 7. Flood Check (3 msgs in 5 sec)
+    # 7. Flood Check
     current_time = time.time()
     flood_cache[user.id] = [t for t in flood_cache[user.id] if current_time - t < 5]
     flood_cache[user.id].append(current_time)
@@ -454,7 +458,7 @@ async def text_handler(m: types.Message):
         await m.answer(f"🌊 <b>{user.first_name}</b> muted (Flood).", reply_markup=get_unmute_kb(user.id))
         return
 
-    # 8. Spam Check (5 continuous msgs)
+    # 8. Spam Check
     last = last_sender[m.chat.id]
     if last == user.id:
         spam_counts[m.chat.id][user.id] += 1
