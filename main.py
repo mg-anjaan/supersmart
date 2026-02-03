@@ -63,7 +63,7 @@ IDENTITY_TRIGGERS = [
 CUSTOM_BLOCK_REPLY = "🚫 MG Anjaan Rahi has restricted me to answer this."
 ABUSE_BLOCK_REPLY = "🚫 <b>Abusive/Offensive language is not allowed.</b>"
 
-# ================= FULL ABUSE LIST (AUTO DELETE + MUTE) =================
+# ================= FULL ABUSE LIST =================
 hindi_words = ["chutiya","madarchod","bhosdike","lund","gand","gaand","randi","behenchod","betichod","mc","bc","lodu","lavde","harami","kutte","kamina","rakhail","randwa","suar","sasura","dogla","saala","tatti","chod","gaandu","bhnchod","bkl","chodne","rundi","bhadwe","nalayak","kamine","chinal","bhand","bhen ke","loda","lode","randi","maa ke","behn ke","gandu","chodna","choot","chut","chutmarike","chutiyapa","hijda","launda","laundiya","lavda","bevda","nashedi","raand","kutti","kuttiya","haramzada","haramzadi","bhosri","bhosriwali","rand","mehnchod"]
 english_words = ["fuck","fucking","motherfucker","bitch","asshole","slut","porn","dick","pussy","sex","boobs","cock","suck","fucker","whore","bastard","jerk","hoe","pervert","screwed","scumbag","balls","blowjob","handjob","cum","sperm","vagina","dildo","horny","bang","banging","anal","nude","nsfw","shit","damn","dumbass","retard","piss","douche","milf","boob","ass","booby","breast","naked","deepthroat","suckmy","gay","lesbian","trans","blow","spank","fetish","orgasm","wetdream","masturbate","moan","ejaculate","strip","whack","nipple","cumshot","lick","spitroast","tits","tit","hooker","escort","prostitute","blowme","wanker","screw","bollocks","bugger","slag","trollop","arse","arsehole","goddamn","shithead","horniness"]
 family_prefixes = ["teri","teri ki","tera","tera ki","teri maa","teri behen","teri gf","teri sister","teri maa ki","teri behen ki","gf","bf","mms","bana","banaa","banaya"]
@@ -88,9 +88,10 @@ def get_unmute_kb(user_id):
 def is_owner(user_id): return user_id == OWNER_ID
 
 async def is_admin(chat, user_id):
+    if user_id == OWNER_ID: return True
     try:
         m = await chat.get_member(user_id)
-        return m.status in ("administrator", "creator") or user_id == OWNER_ID
+        return m.status in ("administrator", "creator")
     except: return False
 
 def remember(uid, role, text):
@@ -134,9 +135,9 @@ async def ask_gemini(uid, text, mode="normal"):
 
     # ========== HUMAN-LIKE PERSONA LOGIC ==========
     base_prompt = (
-        "You are a human-like user on Telegram. "
-        "Detect the user's language and reply in the EXACT SAME language. "
-        "English -> English. Hindi/Hinglish -> Hindi/Hinglish. "
+        "You are a human-like user. "
+        "Detect the user's language and reply in the EXACT SAME language/grammar. "
+        "English -> English. Hindi -> Hindi. Hinglish -> Hinglish. "
         "Never prefix replies with 'System:', 'Assistant:', or 'Bot:'. "
     )
 
@@ -150,7 +151,7 @@ async def ask_gemini(uid, text, mode="normal"):
         else:
             sys = base_prompt + "Be helpful but extremely concise. Max 1-2 sentences."
     else: # Normal
-        sys = base_prompt + "Be casual, friendly, and helpful. Chat naturally like a friend."
+        sys = base_prompt + "Be casual, friendly, and helpful. Chat naturally."
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{CURRENT_MODEL}:generateContent?key={GEMINI_API_KEY}"
     payload = {"contents": [{"parts": [{"text": f"System Instruction: {sys}\nConversation History:\n{history_text}"}]}]}
@@ -176,6 +177,7 @@ async def is_nsfw_direct(img_bytes: bytes) -> bool:
     import base64
     b64_img = base64.b64encode(img_bytes).decode('utf-8')
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{CURRENT_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    
     payload = {
         "contents": [{"parts": [{"text": "Is this image Nude, Porn, or NSFW? Answer YES or NO."}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}]}],
         "safetySettings": [{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"}]
@@ -219,39 +221,54 @@ def get_toggle(text, current):
 @dp.message(Command("ai"))
 async def ai_cmd(m):
     global AI_ENABLED
-    if is_owner(m.from_user.id): AI_ENABLED = get_toggle(m.text, AI_ENABLED); await m.reply(f"AI {'ON' if AI_ENABLED else 'OFF'}")
+    if is_owner(m.from_user.id):
+        AI_ENABLED = get_toggle(m.text, AI_ENABLED)
+        await m.reply(f"AI {'ON' if AI_ENABLED else 'OFF'}")
 
 @dp.message(Command("short"))
 async def short_cmd(m):
     global SHORT_MODE
-    if is_owner(m.from_user.id): SHORT_MODE = get_toggle(m.text, SHORT_MODE); await m.reply(f"Short {'ON' if SHORT_MODE else 'OFF'}")
+    if is_owner(m.from_user.id):
+        SHORT_MODE = get_toggle(m.text, SHORT_MODE)
+        await m.reply(f"Short {'ON' if SHORT_MODE else 'OFF'}")
 
 @dp.message(Command("rude"))
 async def rude_cmd(m):
     global RUDE_MODE
-    if is_owner(m.from_user.id): RUDE_MODE = get_toggle(m.text, RUDE_MODE); await m.reply(f"Rude {'ON 😈' if RUDE_MODE else 'OFF 🙂'}")
+    if is_owner(m.from_user.id):
+        RUDE_MODE = get_toggle(m.text, RUDE_MODE)
+        await m.reply(f"Rude {'ON 😈' if RUDE_MODE else 'OFF 🙂'}")
 
 @dp.message(Command("vision"))
 async def vision_cmd(m):
     global VISION_ENABLED
-    if is_owner(m.from_user.id): VISION_ENABLED = get_toggle(m.text, VISION_ENABLED); await m.reply(f"Vision {'ON' if VISION_ENABLED else 'OFF'}")
+    if is_owner(m.from_user.id):
+        VISION_ENABLED = get_toggle(m.text, VISION_ENABLED)
+        await m.reply(f"Vision {'ON' if VISION_ENABLED else 'OFF'}")
 
 @dp.message(Command("nsfw"))
 async def nsfw_cmd(m):
     global NSFW_ENABLED
-    if is_owner(m.from_user.id): NSFW_ENABLED = get_toggle(m.text, NSFW_ENABLED); await m.reply(f"NSFW {'ON' if NSFW_ENABLED else 'OFF'}")
+    if is_owner(m.from_user.id):
+        NSFW_ENABLED = get_toggle(m.text, NSFW_ENABLED)
+        await m.reply(f"NSFW {'ON' if NSFW_ENABLED else 'OFF'}")
 
 @dp.message(Command("respect"))
 async def respect_cmd(m):
-    if is_owner(m.from_user.id) and m.reply_to_message: RESPECT_USERS.add(m.reply_to_message.from_user.id); await m.reply("✅ Respect ON")
+    if is_owner(m.from_user.id) and m.reply_to_message:
+        RESPECT_USERS.add(m.reply_to_message.from_user.id)
+        await m.reply("✅ Respect ON")
 
 @dp.message(Command("unrespect"))
 async def unrespect_cmd(m):
-    if is_owner(m.from_user.id) and m.reply_to_message: RESPECT_USERS.discard(m.reply_to_message.from_user.id); await m.reply("❌ Respect OFF")
+    if is_owner(m.from_user.id) and m.reply_to_message:
+        RESPECT_USERS.discard(m.reply_to_message.from_user.id)
+        await m.reply("❌ Respect OFF")
 
 @dp.message(Command("addreply"))
 async def addreply_cmd(m):
-    ADD_REPLY_STATE[m.from_user.id] = {}; await m.reply("➡️ Send keyword")
+    ADD_REPLY_STATE[m.from_user.id] = {}
+    await m.reply("➡️ Send keyword")
 
 @dp.message(Command("delreply"))
 async def delreply_cmd(m):
@@ -327,29 +344,37 @@ async def on_unmute_btn(c: CallbackQuery):
 # ================= PHOTO HANDLER =================
 @dp.message(F.photo)
 async def photo_handler(m: types.Message):
-    if m.forward_origin: 
+    user = m.from_user
+    # Anonymous Admin Check (sender_chat) or Real Admin
+    is_anon = m.sender_chat and m.sender_chat.id == m.chat.id
+    is_adm = (user and await is_admin(m.chat, user.id)) or is_anon
+
+    # 1. Forward Block (MEMBERS ONLY)
+    if m.forward_origin and not is_adm:
         await safe_delete(m)
+        if user: await m.answer(f"🚷 <b>{user.first_name}</b>, Forwarded media is not allowed.")
         return
 
-    is_safe_user = is_owner(m.from_user.id) or await is_admin(m.chat, m.from_user.id)
-
+    # Media Group Cache
     if m.media_group_id:
         if m.media_group_id in media_group_cache: return
         media_group_cache.add(m.media_group_id); asyncio.create_task(clean_media_group_cache(m.media_group_id))
 
+    # Download Image for AI
     f = await bot.get_file(m.photo[-1].file_id)
     async with aiohttp.ClientSession() as s:
         async with s.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}") as r: img = await r.read()
 
-    # 1. NSFW CHECK
-    if NSFW_ENABLED and not is_safe_user:
+    # 2. NSFW CHECK (MEMBERS ONLY)
+    if NSFW_ENABLED and not is_adm:
         if await is_nsfw_direct(img):
             await safe_delete(m)
-            await m.chat.restrict(m.from_user.id, permissions=types.ChatPermissions(can_send_messages=False))
-            await m.answer(f"🚫 <b>{m.from_user.first_name}</b> muted (NSFW Detected).", reply_markup=get_unmute_kb(m.from_user.id))
+            if user:
+                await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
+                await m.answer(f"🚫 <b>{user.first_name}</b> muted (NSFW Detected).", reply_markup=get_unmute_kb(user.id))
             return 
 
-    # 2. VISION CHECK
+    # 3. VISION CHECK (AI Response)
     if VISION_ENABLED and (m.caption is None or "@" in m.caption or m.reply_to_message):
         comment = await ask_vision_direct(img)
         if comment: await m.reply(comment)
@@ -357,17 +382,31 @@ async def photo_handler(m: types.Message):
 # ================= TEXT HANDLER =================
 @dp.message(F.text)
 async def text_handler(m: types.Message):
-    # 1. Forward Block (Check first)
-    if m.forward_origin:
-        await safe_delete(m)
-        await m.answer(f"🚷 <b>{m.from_user.first_name}</b>, Forwarded messages not allowed.")
-        return
-
     user = m.from_user
     text = m.text.lower()
-    is_adm = await is_admin(m.chat, user.id)
     
-    # 2. Add Reply
+    # Anonymous Admin Check (sender_chat) or Real Admin
+    is_anon = m.sender_chat and m.sender_chat.id == m.chat.id
+    is_adm = (user and await is_admin(m.chat, user.id)) or is_anon
+
+    # --- ADMIN / ANONYMOUS BYPASS ---
+    if is_adm:
+        # Admins can still trigger AI if they reply to bot
+        if AI_ENABLED and user and (m.reply_to_message and m.reply_to_message.from_user.id == bot.id):
+             mode = "boss" if is_owner(user.id) else "normal"
+             await m.reply(await ask_gemini(user.id, m.text, mode))
+        return
+
+    # --- MEMBER SECURITY LAYER (BELOW) ---
+    if not user: return # Should not happen for members
+
+    # 1. Forward Block
+    if m.forward_origin:
+        await safe_delete(m)
+        await m.answer(f"🚷 <b>{user.first_name}</b>, Forwarded messages are not allowed.")
+        return
+
+    # 2. Add Reply Logic (Admin/Owner only usually, but safe here)
     if user.id in ADD_REPLY_STATE:
         if "key" not in ADD_REPLY_STATE[user.id]:
             ADD_REPLY_STATE[user.id]["key"] = text
@@ -378,59 +417,64 @@ async def text_handler(m: types.Message):
             await m.reply("✅ Saved")
         return
 
-    # === SECURITY LAYER ===
-    if not is_adm:
-        # A. Userbot
-        if text.startswith((".", "/")):
-            cmd = text[1:].split()[0].lower()
-            if cmd in USERBOT_CMD_TRIGGERS:
-                await safe_delete(m)
-                await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
-                await m.answer(f"⚠️ <b>{user.first_name}</b> muted (Command).", reply_markup=get_unmute_kb(user.id)); return
-        # B. Links
-        if LINK_PATTERN.search(text): 
+    # 3. Userbot Check
+    if text.startswith((".", "/")):
+        cmd = text[1:].split()[0].lower()
+        if cmd in USERBOT_CMD_TRIGGERS:
             await safe_delete(m)
-            await m.answer(f"🚫 <b>{user.first_name}</b>, Links are not allowed.")
-            return
-        # C. Abuse Regex (Global List)
-        if ABUSE_PATTERN.search(text):
-             await safe_delete(m)
-             await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
-             await m.answer(f"🚫 <b>{user.first_name}</b> muted. {ABUSE_BLOCK_REPLY}", reply_markup=get_unmute_kb(user.id)); return
-        # D. Custom Block (/block list)
-        for w in CUSTOM_BLOCKED_WORDS:
-            if w in text:
-                await safe_delete(m)
-                await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
-                await m.answer(f"🚫 <b>{user.first_name}</b> muted. {CUSTOM_BLOCK_REPLY}", reply_markup=get_unmute_kb(user.id)); return
-        # E. Flood
-        current_time = time.time()
-        flood_cache[user.id] = [t for t in flood_cache[user.id] if current_time - t < 5]
-        flood_cache[user.id].append(current_time)
-        if len(flood_cache[user.id]) > 3:
-            flood_cache[user.id] = []
             await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
-            await m.answer(f"🌊 <b>{user.first_name}</b> muted (Flood).", reply_markup=get_unmute_kb(user.id)); return
-        # F. Spam
-        last = last_sender[m.chat.id]
-        if last == user.id:
-            spam_counts[m.chat.id][user.id] += 1
-            if spam_counts[m.chat.id][user.id] >= 5:
-                await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
-                spam_counts[m.chat.id][user.id] = 0
-                await m.answer(f"🔇 <b>{user.first_name}</b> muted (Spam).", reply_markup=get_unmute_kb(user.id)); return
-        else:
-            spam_counts[m.chat.id].clear(); spam_counts[m.chat.id][user.id] = 1; last_sender[m.chat.id] = user.id
+            await m.answer(f"⚠️ <b>{user.first_name}</b> muted (Userbot Command).", reply_markup=get_unmute_kb(user.id)); return
 
-    # 3. CUSTOM REPLIES
+    # 4. Link Block
+    if LINK_PATTERN.search(text): 
+        await safe_delete(m)
+        await m.answer(f"🚫 <b>{user.first_name}</b>, Links are not allowed.")
+        return
+
+    # 5. Global Abuse Regex (Auto Delete + Mute)
+    if ABUSE_PATTERN.search(text):
+            await safe_delete(m)
+            await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
+            await m.answer(f"🚫 <b>{user.first_name}</b> muted. {ABUSE_BLOCK_REPLY}", reply_markup=get_unmute_kb(user.id)); return
+
+    # 6. Custom Block (/block list) (Auto Delete + Mute + MG Warn)
+    for w in CUSTOM_BLOCKED_WORDS:
+        if w in text:
+            await safe_delete(m)
+            await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
+            await m.answer(f"🚫 <b>{user.first_name}</b> muted. {CUSTOM_BLOCK_REPLY}", reply_markup=get_unmute_kb(user.id)); return
+
+    # 7. Flood Check (3 msgs in 5 sec)
+    current_time = time.time()
+    flood_cache[user.id] = [t for t in flood_cache[user.id] if current_time - t < 5]
+    flood_cache[user.id].append(current_time)
+    if len(flood_cache[user.id]) > 3:
+        flood_cache[user.id] = []
+        await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
+        await m.answer(f"🌊 <b>{user.first_name}</b> muted (Flood).", reply_markup=get_unmute_kb(user.id))
+        return
+
+    # 8. Spam Check (5 continuous msgs)
+    last = last_sender[m.chat.id]
+    if last == user.id:
+        spam_counts[m.chat.id][user.id] += 1
+        if spam_counts[m.chat.id][user.id] >= 5:
+            await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
+            spam_counts[m.chat.id][user.id] = 0
+            await m.answer(f"🔇 <b>{user.first_name}</b> muted (Spam).", reply_markup=get_unmute_kb(user.id))
+            return
+    else:
+        spam_counts[m.chat.id].clear(); spam_counts[m.chat.id][user.id] = 1; last_sender[m.chat.id] = user.id
+
+    # 9. Custom Replies
     for k, v in REPLIES.items():
         if len(set(text.split()) & set(k.lower().split())) >= 1: return await m.reply(v)
 
-    # 4. IDENTITY
+    # 10. Identity
     if any(t in text for t in IDENTITY_TRIGGERS):
         return await m.reply(IDENTITY_REPLY)
 
-    # 5. AI GATE
+    # 11. AI Response
     bot_me = await bot.get_me()
     if AI_ENABLED and (m.reply_to_message and m.reply_to_message.from_user.id == bot_me.id or f"@{bot_me.username}" in text):
         mode = "boss" if is_owner(user.id) else ("short" if SHORT_MODE else "normal")
@@ -438,7 +482,7 @@ async def text_handler(m: types.Message):
         await m.reply(await ask_gemini(user.id, m.text, mode))
 
 async def main():
-    print("🚀 Bot Started (Final Merged Version)")
+    print("🚀 Bot Started (Final Perfect Version)")
     await find_working_model()
     if not CURRENT_MODEL: print("❌ CRITICAL: No AI Model found.")
     logging.basicConfig(level=logging.INFO)
