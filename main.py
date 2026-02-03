@@ -284,7 +284,6 @@ async def unblock_cmd(m):
             CUSTOM_BLOCKED_WORDS.discard(m.text.split(maxsplit=1)[-1].lower())
             await m.reply("✅ Keyword Unblocked.")
 
-# Alias commands
 @dp.message(Command("fadd"))
 async def fadd_cmd(m): await block_cmd(m)
 @dp.message(Command("fdel"))
@@ -292,9 +291,7 @@ async def fdel_cmd(m): await unblock_cmd(m)
 
 @dp.message(Command("mute"))
 async def mute_cmd(m):
-    # Pass 'm' to check for Anonymous Admin
     if not await is_admin(m.chat, m.from_user.id, m): return
-    
     if m.reply_to_message:
         uid = m.reply_to_message.from_user.id
         await m.chat.restrict(uid, permissions=types.ChatPermissions(can_send_messages=False))
@@ -303,7 +300,6 @@ async def mute_cmd(m):
 @dp.message(Command("unmute"))
 async def unmute_cmd(m):
     if not await is_admin(m.chat, m.from_user.id, m): return
-    
     if m.reply_to_message:
         uid = m.reply_to_message.from_user.id
         await m.chat.restrict(uid, permissions=types.ChatPermissions(
@@ -316,22 +312,28 @@ async def unmute_cmd(m):
 async def help_cmd(m):
     await m.reply("<b>🤖 Commands:</b>\n/ai, /short, /rude, /vision, /nsfw, /respect, /addreply, /block, /mute, /unmute")
 
-# ================= EVENTS =================
+# ================= STATUS & WELCOME (100% WORKING) =================
 @dp.chat_member()
-async def auto_leave(event: ChatMemberUpdated):
+async def on_chat_member_update(event: ChatMemberUpdated):
+    # 1. BOT SECURITY (Auto Leave)
     if event.new_chat_member.user.id == bot.id:
         admins = await bot.get_chat_administrators(event.chat.id)
         if OWNER_ID not in [a.user.id for a in admins]: await bot.leave_chat(event.chat.id)
+        return
 
-@dp.message(F.new_chat_members)
-async def welcome_handler(m: types.Message):
-    for user in m.new_chat_members:
+    # 2. WELCOME LOGIC (Catches Approved Requests & Direct Joins)
+    # Check if user wasn't a member before, and is a member now
+    if event.new_chat_member.status == "member" and event.old_chat_member.status != "member":
+        user = event.new_chat_member.user
         if not user.is_bot:
-            new_welcome_message = (
-                f"👋 <b>Welcome, {user.first_name}!</b> Happy to have you here. 😊\n\n"
-                f"ℹ️ <b>Quick Note:</b> The <b>Group Rules</b> are available in the <b>Group Description (Bio)</b>. Thanks for checking them out!"
-            )
-            await m.reply(new_welcome_message)
+            try:
+                await bot.send_message(
+                    event.chat.id,
+                    f"👋 <b>Welcome, {user.first_name}!</b> Happy to have you here. 😊\n\n"
+                    f"ℹ️ <b>Quick Note:</b> The <b>Group Rules</b> are available in the <b>Group Description (Bio)</b>. Thanks for checking them out!"
+                )
+            except Exception as e:
+                print(f"Welcome Error: {e}")
 
 @dp.callback_query(lambda c: c.data.startswith("unmute_"))
 async def on_unmute_btn(c: CallbackQuery):
@@ -350,18 +352,16 @@ async def photo_handler(m: types.Message):
     is_anon = m.sender_chat and m.sender_chat.id == m.chat.id
     is_adm = (user and await is_admin(m.chat, user.id)) or is_anon
 
-    # ✅ FIX: Admin messages reset spam counters
     if is_adm:
         spam_counts[m.chat.id].clear()
         last_sender[m.chat.id] = None
     
-    # 1. Forward Block (MEMBERS ONLY)
+    # 1. Forward Block
     if m.forward_origin and not is_adm:
         await safe_delete(m)
         if user: await m.answer(f"🚷 <b>{user.first_name}</b>, Forwarded media is not allowed.")
         return
 
-    # Media Cache
     if m.media_group_id:
         if m.media_group_id in media_group_cache: return
         media_group_cache.add(m.media_group_id); asyncio.create_task(clean_media_group_cache(m.media_group_id))
@@ -398,14 +398,12 @@ async def text_handler(m: types.Message):
         spam_counts[m.chat.id].clear()
         last_sender[m.chat.id] = None
         
-        # ✅ FIX: Enable @Mention response for Admins
         bot_me = await bot.get_me()
         if AI_ENABLED and ((m.reply_to_message and m.reply_to_message.from_user.id == bot_me.id) or (f"@{bot_me.username.lower()}" in text)):
              mode = "boss" if is_owner(user.id if user else 0) else "normal"
              await m.reply(await ask_gemini(user.id if user else 0, m.text, mode))
         return
 
-    # --- MEMBER SECURITY ---
     if not user: return 
 
     # 1. Forward Block
@@ -414,15 +412,12 @@ async def text_handler(m: types.Message):
         await m.answer(f"🚷 <b>{user.first_name}</b>, Forwarded messages are not allowed.")
         return
 
-    # 2. Add Reply Logic
+    # 2. Add Reply
     if user.id in ADD_REPLY_STATE:
         if "key" not in ADD_REPLY_STATE[user.id]:
-            ADD_REPLY_STATE[user.id]["key"] = text
-            await m.reply("➡️ Send reply")
+            ADD_REPLY_STATE[user.id]["key"] = text; await m.reply("➡️ Send reply")
         else:
-            REPLIES[ADD_REPLY_STATE[user.id]["key"]] = m.text
-            ADD_REPLY_STATE.pop(user.id)
-            await m.reply("✅ Saved")
+            REPLIES[ADD_REPLY_STATE[user.id]["key"]] = m.text; ADD_REPLY_STATE.pop(user.id); await m.reply("✅ Saved")
         return
 
     # 3. Userbot / Links / Abuse
@@ -434,19 +429,15 @@ async def text_handler(m: types.Message):
             await m.answer(f"⚠️ <b>{user.first_name}</b> muted (Command).", reply_markup=get_unmute_kb(user.id)); return
 
     if LINK_PATTERN.search(text): 
-        await safe_delete(m)
-        await m.answer(f"🚫 <b>{user.first_name}</b>, Links are not allowed.")
-        return
+        await safe_delete(m); await m.answer(f"🚫 <b>{user.first_name}</b>, Links are not allowed."); return
 
     if ABUSE_PATTERN.search(text):
-            await safe_delete(m)
-            await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
+            await safe_delete(m); await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
             await m.answer(f"🚫 <b>{user.first_name}</b> muted. {ABUSE_BLOCK_REPLY}", reply_markup=get_unmute_kb(user.id)); return
 
     for w in CUSTOM_BLOCKED_WORDS:
         if w in text:
-            await safe_delete(m)
-            await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
+            await safe_delete(m); await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
             await m.answer(f"🚫 <b>{user.first_name}</b> muted. {CUSTOM_BLOCK_REPLY}", reply_markup=get_unmute_kb(user.id)); return
 
     # 4. Flood Check
@@ -471,18 +462,15 @@ async def text_handler(m: types.Message):
     else:
         spam_counts[m.chat.id].clear(); spam_counts[m.chat.id][user.id] = 1; last_sender[m.chat.id] = user.id
 
-    # 6. Custom Replies / Identity
+    # 6. Custom Replies
     for k, v in REPLIES.items():
         if len(set(text.split()) & set(k.lower().split())) >= 1: return await m.reply(v)
     if any(t in text for t in IDENTITY_TRIGGERS): return await m.reply(IDENTITY_REPLY)
 
-    # 7. AI Response (MEMBER)
+    # 7. AI Response
     bot_me = await bot.get_me()
-    # ✅ FIX: Trigger if Reply OR Mention (Case Insensitive)
     if AI_ENABLED and ((m.reply_to_message and m.reply_to_message.from_user.id == bot_me.id) or (f"@{bot_me.username.lower()}" in text)):
-        # Talking to bot resets spam count for user
         spam_counts[m.chat.id][user.id] = 0
-        
         mode = "boss" if is_owner(user.id) else ("short" if SHORT_MODE else "normal")
         if user.id in RESPECT_USERS: mode = "respect"
         await m.reply(await ask_gemini(user.id, m.text, mode))
