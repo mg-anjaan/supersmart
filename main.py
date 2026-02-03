@@ -212,39 +212,54 @@ def get_toggle(text, current):
 @dp.message(Command("ai"))
 async def ai_cmd(m):
     global AI_ENABLED
-    if is_owner(m.from_user.id): AI_ENABLED = get_toggle(m.text, AI_ENABLED); await m.reply(f"AI {'ON' if AI_ENABLED else 'OFF'}")
+    if is_owner(m.from_user.id):
+        AI_ENABLED = get_toggle(m.text, AI_ENABLED)
+        await m.reply(f"AI {'ON' if AI_ENABLED else 'OFF'}")
 
 @dp.message(Command("short"))
 async def short_cmd(m):
     global SHORT_MODE
-    if is_owner(m.from_user.id): SHORT_MODE = get_toggle(m.text, SHORT_MODE); await m.reply(f"Short {'ON' if SHORT_MODE else 'OFF'}")
+    if is_owner(m.from_user.id):
+        SHORT_MODE = get_toggle(m.text, SHORT_MODE)
+        await m.reply(f"Short {'ON' if SHORT_MODE else 'OFF'}")
 
 @dp.message(Command("rude"))
 async def rude_cmd(m):
     global RUDE_MODE
-    if is_owner(m.from_user.id): RUDE_MODE = get_toggle(m.text, RUDE_MODE); await m.reply(f"Rude {'ON 😈' if RUDE_MODE else 'OFF 🙂'}")
+    if is_owner(m.from_user.id):
+        RUDE_MODE = get_toggle(m.text, RUDE_MODE)
+        await m.reply(f"Rude {'ON 😈' if RUDE_MODE else 'OFF 🙂'}")
 
 @dp.message(Command("vision"))
 async def vision_cmd(m):
     global VISION_ENABLED
-    if is_owner(m.from_user.id): VISION_ENABLED = get_toggle(m.text, VISION_ENABLED); await m.reply(f"Vision {'ON' if VISION_ENABLED else 'OFF'}")
+    if is_owner(m.from_user.id):
+        VISION_ENABLED = get_toggle(m.text, VISION_ENABLED)
+        await m.reply(f"Vision {'ON' if VISION_ENABLED else 'OFF'}")
 
 @dp.message(Command("nsfw"))
 async def nsfw_cmd(m):
     global NSFW_ENABLED
-    if is_owner(m.from_user.id): NSFW_ENABLED = get_toggle(m.text, NSFW_ENABLED); await m.reply(f"NSFW {'ON' if NSFW_ENABLED else 'OFF'}")
+    if is_owner(m.from_user.id):
+        NSFW_ENABLED = get_toggle(m.text, NSFW_ENABLED)
+        await m.reply(f"NSFW {'ON' if NSFW_ENABLED else 'OFF'}")
 
 @dp.message(Command("respect"))
 async def respect_cmd(m):
-    if is_owner(m.from_user.id) and m.reply_to_message: RESPECT_USERS.add(m.reply_to_message.from_user.id); await m.reply("✅ Respect ON")
+    if is_owner(m.from_user.id) and m.reply_to_message:
+        RESPECT_USERS.add(m.reply_to_message.from_user.id)
+        await m.reply("✅ Respect ON")
 
 @dp.message(Command("unrespect"))
 async def unrespect_cmd(m):
-    if is_owner(m.from_user.id) and m.reply_to_message: RESPECT_USERS.discard(m.reply_to_message.from_user.id); await m.reply("❌ Respect OFF")
+    if is_owner(m.from_user.id) and m.reply_to_message:
+        RESPECT_USERS.discard(m.reply_to_message.from_user.id)
+        await m.reply("❌ Respect OFF")
 
 @dp.message(Command("addreply"))
 async def addreply_cmd(m):
-    ADD_REPLY_STATE[m.from_user.id] = {}; await m.reply("➡️ Send keyword")
+    ADD_REPLY_STATE[m.from_user.id] = {}
+    await m.reply("➡️ Send keyword")
 
 @dp.message(Command("delreply"))
 async def delreply_cmd(m):
@@ -258,13 +273,18 @@ async def list_cmd(m): await m.reply(str(REPLIES) if REPLIES else "❌ No replie
 @dp.message(Command("block"))
 async def block_cmd(m):
     if is_owner(m.from_user.id):
-        if len(m.text.split()) > 1: CUSTOM_BLOCKED_WORDS.add(m.text.split(maxsplit=1)[-1].lower()); await m.reply("🚫 Keyword Blocked.")
+        if len(m.text.split()) > 1:
+            CUSTOM_BLOCKED_WORDS.add(m.text.split(maxsplit=1)[-1].lower())
+            await m.reply("🚫 Keyword Blocked (MG Restriction).")
 
 @dp.message(Command("unblock"))
 async def unblock_cmd(m):
     if is_owner(m.from_user.id):
-        if len(m.text.split()) > 1: CUSTOM_BLOCKED_WORDS.discard(m.text.split(maxsplit=1)[-1].lower()); await m.reply("✅ Keyword Unblocked.")
+        if len(m.text.split()) > 1:
+            CUSTOM_BLOCKED_WORDS.discard(m.text.split(maxsplit=1)[-1].lower())
+            await m.reply("✅ Keyword Unblocked.")
 
+# Alias commands
 @dp.message(Command("fadd"))
 async def fadd_cmd(m): await block_cmd(m)
 @dp.message(Command("fdel"))
@@ -272,7 +292,9 @@ async def fdel_cmd(m): await unblock_cmd(m)
 
 @dp.message(Command("mute"))
 async def mute_cmd(m):
+    # Pass 'm' to check for Anonymous Admin
     if not await is_admin(m.chat, m.from_user.id, m): return
+    
     if m.reply_to_message:
         uid = m.reply_to_message.from_user.id
         await m.chat.restrict(uid, permissions=types.ChatPermissions(can_send_messages=False))
@@ -281,6 +303,7 @@ async def mute_cmd(m):
 @dp.message(Command("unmute"))
 async def unmute_cmd(m):
     if not await is_admin(m.chat, m.from_user.id, m): return
+    
     if m.reply_to_message:
         uid = m.reply_to_message.from_user.id
         await m.chat.restrict(uid, permissions=types.ChatPermissions(
@@ -304,7 +327,11 @@ async def auto_leave(event: ChatMemberUpdated):
 async def welcome_handler(m: types.Message):
     for user in m.new_chat_members:
         if not user.is_bot:
-            await m.reply(f"👋 <b>Welcome, {user.first_name}!</b> Happy to have you here. 😊\n\nℹ️ <b>Quick Note:</b> The <b>Group Rules</b> are available in the <b>Group Description (Bio)</b>. Thanks for checking them out!")
+            new_welcome_message = (
+                f"👋 <b>Welcome, {user.first_name}!</b> Happy to have you here. 😊\n\n"
+                f"ℹ️ <b>Quick Note:</b> The <b>Group Rules</b> are available in the <b>Group Description (Bio)</b>. Thanks for checking them out!"
+            )
+            await m.reply(new_welcome_message)
 
 @dp.callback_query(lambda c: c.data.startswith("unmute_"))
 async def on_unmute_btn(c: CallbackQuery):
@@ -323,11 +350,10 @@ async def photo_handler(m: types.Message):
     is_anon = m.sender_chat and m.sender_chat.id == m.chat.id
     is_adm = (user and await is_admin(m.chat, user.id)) or is_anon
 
-    # ✅ FIX: Admin messages reset spam counters for everyone (Breaks the chain)
+    # ✅ FIX: Admin messages reset spam counters
     if is_adm:
         spam_counts[m.chat.id].clear()
         last_sender[m.chat.id] = None
-        # Admin Logic Ends here? No, they might use vision features below.
     
     # 1. Forward Block (MEMBERS ONLY)
     if m.forward_origin and not is_adm:
@@ -335,6 +361,7 @@ async def photo_handler(m: types.Message):
         if user: await m.answer(f"🚷 <b>{user.first_name}</b>, Forwarded media is not allowed.")
         return
 
+    # Media Cache
     if m.media_group_id:
         if m.media_group_id in media_group_cache: return
         media_group_cache.add(m.media_group_id); asyncio.create_task(clean_media_group_cache(m.media_group_id))
@@ -362,20 +389,23 @@ async def photo_handler(m: types.Message):
 async def text_handler(m: types.Message):
     user = m.from_user
     text = m.text.lower()
+    
     is_anon = m.sender_chat and m.sender_chat.id == m.chat.id
     is_adm = (user and await is_admin(m.chat, user.id)) or is_anon
 
-    # ✅ FIX: Admin messages reset spam counters
+    # --- ADMIN BYPASS ---
     if is_adm:
         spam_counts[m.chat.id].clear()
         last_sender[m.chat.id] = None
         
-        # Admin AI Trigger
-        if AI_ENABLED and user and (m.reply_to_message and m.reply_to_message.from_user.id == bot.id):
-             mode = "boss" if is_owner(user.id) else "normal"
-             await m.reply(await ask_gemini(user.id, m.text, mode))
+        # ✅ FIX: Enable @Mention response for Admins
+        bot_me = await bot.get_me()
+        if AI_ENABLED and ((m.reply_to_message and m.reply_to_message.from_user.id == bot_me.id) or (f"@{bot_me.username.lower()}" in text)):
+             mode = "boss" if is_owner(user.id if user else 0) else "normal"
+             await m.reply(await ask_gemini(user.id if user else 0, m.text, mode))
         return
 
+    # --- MEMBER SECURITY ---
     if not user: return 
 
     # 1. Forward Block
@@ -384,12 +414,15 @@ async def text_handler(m: types.Message):
         await m.answer(f"🚷 <b>{user.first_name}</b>, Forwarded messages are not allowed.")
         return
 
-    # 2. Add Reply
+    # 2. Add Reply Logic
     if user.id in ADD_REPLY_STATE:
         if "key" not in ADD_REPLY_STATE[user.id]:
-            ADD_REPLY_STATE[user.id]["key"] = text; await m.reply("➡️ Send reply")
+            ADD_REPLY_STATE[user.id]["key"] = text
+            await m.reply("➡️ Send reply")
         else:
-            REPLIES[ADD_REPLY_STATE[user.id]["key"]] = m.text; ADD_REPLY_STATE.pop(user.id); await m.reply("✅ Saved")
+            REPLIES[ADD_REPLY_STATE[user.id]["key"]] = m.text
+            ADD_REPLY_STATE.pop(user.id)
+            await m.reply("✅ Saved")
         return
 
     # 3. Userbot / Links / Abuse
@@ -401,15 +434,19 @@ async def text_handler(m: types.Message):
             await m.answer(f"⚠️ <b>{user.first_name}</b> muted (Command).", reply_markup=get_unmute_kb(user.id)); return
 
     if LINK_PATTERN.search(text): 
-        await safe_delete(m); await m.answer(f"🚫 <b>{user.first_name}</b>, Links are not allowed."); return
+        await safe_delete(m)
+        await m.answer(f"🚫 <b>{user.first_name}</b>, Links are not allowed.")
+        return
 
     if ABUSE_PATTERN.search(text):
-            await safe_delete(m); await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
+            await safe_delete(m)
+            await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
             await m.answer(f"🚫 <b>{user.first_name}</b> muted. {ABUSE_BLOCK_REPLY}", reply_markup=get_unmute_kb(user.id)); return
 
     for w in CUSTOM_BLOCKED_WORDS:
         if w in text:
-            await safe_delete(m); await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
+            await safe_delete(m)
+            await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
             await m.answer(f"🚫 <b>{user.first_name}</b> muted. {CUSTOM_BLOCK_REPLY}", reply_markup=get_unmute_kb(user.id)); return
 
     # 4. Flood Check
@@ -419,16 +456,18 @@ async def text_handler(m: types.Message):
     if len(flood_cache[user.id]) > 3:
         flood_cache[user.id] = []
         await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
-        await m.answer(f"🌊 <b>{user.first_name}</b> muted (Flood).", reply_markup=get_unmute_kb(user.id)); return
+        await m.answer(f"🌊 <b>{user.first_name}</b> muted (Flood).", reply_markup=get_unmute_kb(user.id))
+        return
 
-    # 5. Spam Check (Continuous)
+    # 5. Spam Check
     last = last_sender[m.chat.id]
     if last == user.id:
         spam_counts[m.chat.id][user.id] += 1
         if spam_counts[m.chat.id][user.id] >= 5:
             await m.chat.restrict(user.id, permissions=types.ChatPermissions(can_send_messages=False))
             spam_counts[m.chat.id][user.id] = 0
-            await m.answer(f"🔇 <b>{user.first_name}</b> muted (Spam).", reply_markup=get_unmute_kb(user.id)); return
+            await m.answer(f"🔇 <b>{user.first_name}</b> muted (Spam).", reply_markup=get_unmute_kb(user.id))
+            return
     else:
         spam_counts[m.chat.id].clear(); spam_counts[m.chat.id][user.id] = 1; last_sender[m.chat.id] = user.id
 
@@ -437,10 +476,11 @@ async def text_handler(m: types.Message):
         if len(set(text.split()) & set(k.lower().split())) >= 1: return await m.reply(v)
     if any(t in text for t in IDENTITY_TRIGGERS): return await m.reply(IDENTITY_REPLY)
 
-    # 7. AI Response
+    # 7. AI Response (MEMBER)
     bot_me = await bot.get_me()
-    if AI_ENABLED and (m.reply_to_message and m.reply_to_message.from_user.id == bot_me.id or f"@{bot_me.username}" in text):
-        # ✅ FIX: Interacting with AI resets spam count for user
+    # ✅ FIX: Trigger if Reply OR Mention (Case Insensitive)
+    if AI_ENABLED and ((m.reply_to_message and m.reply_to_message.from_user.id == bot_me.id) or (f"@{bot_me.username.lower()}" in text)):
+        # Talking to bot resets spam count for user
         spam_counts[m.chat.id][user.id] = 0
         
         mode = "boss" if is_owner(user.id) else ("short" if SHORT_MODE else "normal")
