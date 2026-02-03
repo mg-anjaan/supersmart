@@ -6,7 +6,7 @@ import io
 import json
 import unicodedata
 import aiohttp
-import time  # <--- Added for Flood Check
+import time
 from collections import defaultdict, deque
 from PIL import Image
 
@@ -39,8 +39,8 @@ NSFW_ENABLED = True
 CURRENT_MODEL = None 
 
 # Data Stores
-spam_counts = defaultdict(lambda: defaultdict(int)) # For Continuous Spam
-flood_cache = defaultdict(list)                     # For Time-based Flood (3 in 5s)
+spam_counts = defaultdict(lambda: defaultdict(int))
+flood_cache = defaultdict(list)
 last_sender = defaultdict(lambda: None)
 media_group_cache = set()
 MEMORY = {}
@@ -49,10 +49,9 @@ REPLIES = {}
 BLOCKED_WORDS_AI = set() 
 RESPECT_USERS = set()
 
-# Commands that trigger auto-mute (Userbots)
 USERBOT_CMD_TRIGGERS = {"raid","spam","ping","eval","exec","repeat","dox","flood","bomb"}
 
-# ================= WORD LISTS (Full) =================
+# ================= FULL ABUSIVE WORD LIST (RESTORED) =================
 hindi_words = [
     "chutiya","madarchod","bhosdike","lund","gand","gaand","randi","behenchod","betichod","mc","bc",
     "lodu","lavde","harami","kutte","kamina","rakhail","randwa","suar","sasura","dogla","saala","tatti","chod","gaandu", "bhnchod","bkl",
@@ -110,7 +109,7 @@ LINK_PATTERN = re.compile(r"(https?://|www\.|t\.me/|telegram\.me/)", re.IGNORECA
 def get_unmute_kb(user_id):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔓 Unmute User (Admin)", callback_data=f"unmute_{user_id}")]])
 
-# --- API LOGIC (Working Model Discovery) ---
+# --- FAST API LOGIC ---
 async def find_working_model():
     global CURRENT_MODEL
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
@@ -120,12 +119,16 @@ async def find_working_model():
             async with session.get(url) as response:
                 data = await response.json()
                 models = [m['name'] for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
-                preferred = ["models/gemini-2.5-flash", "models/gemini-1.5-flash", "models/gemini-pro"]
+                
+                # Priority: Flash (Fastest) -> Pro (Stable)
+                preferred = ["models/gemini-1.5-flash", "models/gemini-2.0-flash", "models/gemini-pro"]
+                
                 for p in preferred:
                     if p in models:
                         CURRENT_MODEL = p.replace("models/", "")
-                        print(f"✅ FOUND MODEL: {CURRENT_MODEL}")
+                        print(f"✅ FOUND FASTEST MODEL: {CURRENT_MODEL}")
                         return
+                
                 if models:
                     CURRENT_MODEL = models[0].replace("models/", "")
                     print(f"⚠️ Fallback: {CURRENT_MODEL}")
@@ -159,27 +162,42 @@ async def ask_gemini_direct(uid, text, mode="normal"):
                 return "⚠️ AI Error."
     except: return "⚠️ Connection Error"
 
+# ✅ FAST NSFW CHECK (Detects Blocks & Refusals)
 async def is_nsfw_direct(img_bytes: bytes) -> bool:
     if not CURRENT_MODEL: return False
     import base64
     b64_img = base64.b64encode(img_bytes).decode('utf-8')
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{CURRENT_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    
     payload = {
-        "contents": [{"parts": [{"text": "Is this image Nude or Porn? Answer YES or NO."}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}]}],
+        "contents": [{"parts": [{"text": "Is this image Nude, Porn, or NSFW? Answer YES or NO."}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}]}],
         "safetySettings": [{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"}]
     }
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload) as response:
                 data = await response.json()
-                ratings = data.get("candidates", [])[0].get("safetyRatings", [])
+                
+                # 1. Did Google BLOCK the response? (Means severe porn)
+                if data.get("promptFeedback", {}).get("blockReason") == "SAFETY":
+                    return True
+                
+                # 2. Did it finish early due to safety?
+                if data.get("candidates") and data["candidates"][0].get("finishReason") == "SAFETY":
+                    return True
+
+                # 3. Check Safety Ratings
+                ratings = data.get("candidates", [{}])[0].get("safetyRatings", [])
                 for r in ratings:
                     if r["category"] == "HARM_CATEGORY_SEXUALLY_EXPLICIT" and r["probability"] in ["HIGH", "MEDIUM"]:
                         return True
-                if "candidates" in data:
+                
+                # 4. Check Text Response
+                if data.get("candidates"):
                     text = data["candidates"][0]["content"]["parts"][0]["text"].lower()
                     if "yes" in text: return True
-    except: pass
+    except Exception as e:
+        logging.error(f"NSFW Check Error: {e}")
     return False
 
 async def ask_vision_direct(img_bytes: bytes) -> str:
@@ -187,7 +205,7 @@ async def ask_vision_direct(img_bytes: bytes) -> str:
     import base64
     b64_img = base64.b64encode(img_bytes).decode('utf-8')
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{CURRENT_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    payload = {"contents": [{"parts": [{"text": "Comment on this image."}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}]}]}
+    payload = {"contents": [{"parts": [{"text": "Comment on this image casually in 5 words."}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}]}]}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload) as response:
@@ -199,14 +217,16 @@ async def ask_vision_direct(img_bytes: bytes) -> str:
 # ================= HANDLERS =================
 @dp.message(CommandStart())
 async def start_cmd(m: aiogram_types.Message):
-    await m.answer(f"🤖 <b>Bot Online!</b>\nModel: {CURRENT_MODEL}\nFlood & Spam Protection Active.")
+    await m.answer(f"🤖 <b>Bot Online!</b>\nModel: {CURRENT_MODEL}\n⚡ Fast Mode Active.")
 
 @dp.message(Command("help"))
 async def help_cmd(m: aiogram_types.Message):
     await m.answer("Commands: /ai, /rude, /short, /vision, /nsfw, /block, /unblock, /mute, /unmute")
 
 # --- ADMIN CHECKS ---
-def is_owner(user_id): return user_id == OWNER_ID
+def is_owner(user_id): 
+    return user_id == OWNER_ID
+
 async def is_admin(chat, user_id):
     try:
         m = await chat.get_member(user_id)
@@ -319,6 +339,7 @@ async def on_photo(m: aiogram_types.Message):
     async with aiohttp.ClientSession() as s:
         async with s.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}") as r: img = await r.read()
 
+    # Priority 1: NSFW Check (Delete + Mute)
     if NSFW_ENABLED:
         if await is_nsfw_direct(img):
             await m.delete()
@@ -326,6 +347,7 @@ async def on_photo(m: aiogram_types.Message):
             await m.answer(f"🚫 <b>{m.from_user.first_name}</b> muted (NSFW).", reply_markup=get_unmute_kb(m.from_user.id))
             return
 
+    # Priority 2: Vision Comment (Only if Safe)
     if VISION_ENABLED and (m.caption is None or "@" in m.caption or m.reply_to_message):
         comment = await ask_vision_direct(img)
         if comment: await m.reply(comment)
@@ -348,30 +370,26 @@ async def on_text(m: aiogram_types.Message):
 
     # === SECURITY LAYER ===
     if not is_adm:
-        # 1. Userbot Commands
+        # 1. Userbot
         if text.startswith((".", "/")):
             cmd = text[1:].split()[0].lower()
             if cmd in USERBOT_CMD_TRIGGERS:
                 await m.delete(); await m.chat.restrict(user.id, permissions=aiogram_types.ChatPermissions(can_send_messages=False))
-                await m.answer(f"⚠️ <b>{user.first_name}</b> muted (Userbot Cmd).", reply_markup=get_unmute_kb(user.id)); return
-        
-        # 2. Links / Forwards
+                await m.answer(f"⚠️ <b>{user.first_name}</b> muted (Command).", reply_markup=get_unmute_kb(user.id)); return
+        # 2. Links
         if m.forward_origin or LINK_PATTERN.search(text): await m.delete(); return
-        
-        # 3. Abusive Words (Smart Regex)
+        # 3. Abuse
         if ABUSE_PATTERN.search(text):
             await m.delete(); await m.chat.restrict(user.id, permissions=aiogram_types.ChatPermissions(can_send_messages=False))
             await m.answer(f"🚫 <b>{user.first_name}</b> muted (Abuse).", reply_markup=get_unmute_kb(user.id)); return
-        
-        # 4. Flood Check (3 msgs in 5 sec)
+        # 4. Flood (3 in 5s)
         current_time = time.time()
-        flood_cache[user.id] = [t for t in flood_cache[user.id] if current_time - t < 5] # Clean old
+        flood_cache[user.id] = [t for t in flood_cache[user.id] if current_time - t < 5]
         flood_cache[user.id].append(current_time)
         if len(flood_cache[user.id]) > 3:
             await m.chat.restrict(user.id, permissions=aiogram_types.ChatPermissions(can_send_messages=False))
-            flood_cache[user.id] = [] # Reset
-            await m.answer(f"🌊 <b>{user.first_name}</b> muted (Flood: 3+ msgs in 5s).", reply_markup=get_unmute_kb(user.id)); return
-
+            flood_cache[user.id] = []
+            await m.answer(f"🌊 <b>{user.first_name}</b> muted (Flood).", reply_markup=get_unmute_kb(user.id)); return
         # 5. Continuous Spam (5 back-to-back)
         last = last_sender[m.chat.id]
         if last == user.id:
@@ -379,11 +397,10 @@ async def on_text(m: aiogram_types.Message):
             if spam_counts[m.chat.id][user.id] >= 5:
                 await m.chat.restrict(user.id, permissions=aiogram_types.ChatPermissions(can_send_messages=False))
                 spam_counts[m.chat.id][user.id] = 0
-                await m.answer(f"🔇 <b>{user.first_name}</b> muted (Spam: 5+ msgs).", reply_markup=get_unmute_kb(user.id)); return
+                await m.answer(f"🔇 <b>{user.first_name}</b> muted (Spam).", reply_markup=get_unmute_kb(user.id)); return
         else:
             spam_counts[m.chat.id].clear(); spam_counts[m.chat.id][user.id] = 1; last_sender[m.chat.id] = user.id
 
-    # === LOGIC LAYER ===
     if any(w in text.lower() for w in BLOCKED_WORDS_AI): return
     if text.lower() in REPLIES: await m.reply(REPLIES[text.lower()]); return
 
@@ -393,7 +410,7 @@ async def on_text(m: aiogram_types.Message):
         await m.reply(await ask_gemini_direct(user.id, text, mode))
 
 async def main():
-    print("🚀 Bot Started (Full Security + Flood/Spam Fix)")
+    print("🚀 Bot Started (Final Speed Optimized Version)")
     await find_working_model()
     if not CURRENT_MODEL: print("❌ CRITICAL: No AI Model found.")
     logging.basicConfig(level=logging.INFO)
