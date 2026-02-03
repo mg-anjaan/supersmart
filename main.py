@@ -6,6 +6,7 @@ import unicodedata
 import aiohttp
 import base64
 import time
+import sys
 from collections import defaultdict, deque
 
 from aiogram import Bot, Dispatcher, types, F
@@ -22,6 +23,7 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 if not BOT_TOKEN or not GEMINI_API_KEY:
     raise SystemExit("❌ Error: Missing BOT_TOKEN or GEMINI_API_KEY")
 
+# Optimized Bot Instance
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
@@ -34,9 +36,10 @@ NSFW_ENABLED = True
 
 # ACTIVE MODEL
 CURRENT_MODEL = None 
+HTTP_SESSION = None # Reusable connection
 
 # ================= DATA =================
-MEMORY = {}
+MEMORY = defaultdict(lambda: deque(maxlen=6)) # Limit memory history automatically
 ADD_REPLY_STATE = {}
 REPLIES = {}
 CUSTOM_BLOCKED_WORDS = set() 
@@ -71,7 +74,6 @@ combined_words = hindi_words + english_words
 combo_words = [f"{p} {c}" for p in family_prefixes for c in combined_words]
 final_word_list = combined_words + combo_words
 
-# Regex Builder
 def tolerant_pattern(word): return r"[\W_]*".join(re.escape(c) for c in word)
 def build_pattern(words):
     patterns = [tolerant_pattern(w) for w in words]
@@ -96,7 +98,6 @@ async def is_admin(chat, user_id, message=None):
     except: return False
 
 def remember(uid, role, text):
-    MEMORY.setdefault(uid, deque(maxlen=6))
     MEMORY[uid].append(f"{role}: {text}")
 
 async def safe_delete(message):
@@ -107,25 +108,43 @@ async def clean_media_group_cache(mid):
     await asyncio.sleep(15)
     media_group_cache.discard(mid)
 
-# ================= FAST GEMINI API LOGIC =================
+# 🧹 BACKGROUND CLEANER (PREVENTS RAILWAY CRASH)
+async def cleanup_task():
+    while True:
+        await asyncio.sleep(600) # Every 10 mins
+        spam_counts.clear()
+        flood_cache.clear()
+        last_sender.clear()
+        # Keep recent memory only
+        if len(MEMORY) > 500:
+            keys_to_del = list(MEMORY.keys())[:-100]
+            for k in keys_to_del: del MEMORY[k]
+
+# ================= OPTIMIZED API LOGIC =================
+async def get_session():
+    global HTTP_SESSION
+    if HTTP_SESSION is None or HTTP_SESSION.closed:
+        HTTP_SESSION = aiohttp.ClientSession()
+    return HTTP_SESSION
+
 async def find_working_model():
     global CURRENT_MODEL
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
     print("🔍 Checking available models...")
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                data = await response.json()
-                models = [m['name'] for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
-                preferred = ["models/gemini-1.5-flash", "models/gemini-2.0-flash", "models/gemini-pro"]
-                for p in preferred:
-                    if p in models:
-                        CURRENT_MODEL = p.replace("models/", "")
-                        print(f"✅ FOUND MODEL: {CURRENT_MODEL}")
-                        return
-                if models:
-                    CURRENT_MODEL = models[0].replace("models/", "")
-                    print(f"⚠️ Fallback: {CURRENT_MODEL}")
+        session = await get_session()
+        async with session.get(url) as response:
+            data = await response.json()
+            models = [m['name'] for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
+            preferred = ["models/gemini-1.5-flash", "models/gemini-2.0-flash", "models/gemini-pro"]
+            for p in preferred:
+                if p in models:
+                    CURRENT_MODEL = p.replace("models/", "")
+                    print(f"✅ FOUND MODEL: {CURRENT_MODEL}")
+                    return
+            if models:
+                CURRENT_MODEL = models[0].replace("models/", "")
+                print(f"⚠️ Fallback: {CURRENT_MODEL}")
     except Exception as e:
         print(f"❌ Connection Failed: {e}")
 
@@ -151,20 +170,19 @@ async def ask_gemini(uid, text, mode="normal"):
     payload = {"contents": [{"parts": [{"text": f"System Instruction: {sys}\nConversation History:\n{history_text}"}]}]}
     
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as response:
-                result = await response.json()
-                if response.status == 200 and "candidates" in result:
-                    reply = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-                    prefixes = ["system:", "assistant:", "bot:", "ai:"]
-                    for p in prefixes:
-                        if reply.lower().startswith(p): reply = reply[len(p):].strip()
-                    remember(uid, "assistant", reply)
-                    return reply
-                return "⚠️ AI Error."
+        session = await get_session()
+        async with session.post(url, json=payload) as response:
+            result = await response.json()
+            if response.status == 200 and "candidates" in result:
+                reply = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+                prefixes = ["system:", "assistant:", "bot:", "ai:"]
+                for p in prefixes:
+                    if reply.lower().startswith(p): reply = reply[len(p):].strip()
+                remember(uid, "assistant", reply)
+                return reply
+            return "⚠️ AI Error."
     except: return "⚠️ Connection Error"
 
-# ================= IMAGE LOGIC =================
 async def is_nsfw_direct(img_bytes: bytes) -> bool:
     if not CURRENT_MODEL: return False
     import base64
@@ -175,17 +193,17 @@ async def is_nsfw_direct(img_bytes: bytes) -> bool:
         "safetySettings": [{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"}]
     }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as response:
-                data = await response.json()
-                if data.get("promptFeedback", {}).get("blockReason") == "SAFETY": return True
-                if data.get("candidates") and data["candidates"][0].get("finishReason") == "SAFETY": return True
-                ratings = data.get("candidates", [{}])[0].get("safetyRatings", [])
-                for r in ratings:
-                    if r["category"] == "HARM_CATEGORY_SEXUALLY_EXPLICIT" and r["probability"] in ["HIGH", "MEDIUM"]: return True
-                if data.get("candidates"):
-                    text = data["candidates"][0]["content"]["parts"][0]["text"].lower()
-                    if "yes" in text: return True
+        session = await get_session()
+        async with session.post(url, json=payload) as response:
+            data = await response.json()
+            if data.get("promptFeedback", {}).get("blockReason") == "SAFETY": return True
+            if data.get("candidates") and data["candidates"][0].get("finishReason") == "SAFETY": return True
+            ratings = data.get("candidates", [{}])[0].get("safetyRatings", [])
+            for r in ratings:
+                if r["category"] == "HARM_CATEGORY_SEXUALLY_EXPLICIT" and r["probability"] in ["HIGH", "MEDIUM"]: return True
+            if data.get("candidates"):
+                text = data["candidates"][0]["content"]["parts"][0]["text"].lower()
+                if "yes" in text: return True
     except: pass
     return False
 
@@ -196,10 +214,10 @@ async def ask_vision_direct(img_bytes: bytes) -> str:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{CURRENT_MODEL}:generateContent?key={GEMINI_API_KEY}"
     payload = {"contents": [{"parts": [{"text": "Casual friendly one-line comment."}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}]}]}
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as response:
-                data = await response.json()
-                if "candidates" in data: return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        session = await get_session()
+        async with session.post(url, json=payload) as response:
+            data = await response.json()
+            if "candidates" in data: return data["candidates"][0]["content"]["parts"][0]["text"].strip()
     except: pass
     return ""
 
@@ -312,17 +330,16 @@ async def unmute_cmd(m):
 async def help_cmd(m):
     await m.reply("<b>🤖 Commands:</b>\n/ai, /short, /rude, /vision, /nsfw, /respect, /addreply, /block, /mute, /unmute")
 
-# ================= STATUS & WELCOME (100% WORKING) =================
+# ================= EVENTS =================
 @dp.chat_member()
 async def on_chat_member_update(event: ChatMemberUpdated):
-    # 1. BOT SECURITY (Auto Leave)
+    # Auto-leave
     if event.new_chat_member.user.id == bot.id:
         admins = await bot.get_chat_administrators(event.chat.id)
         if OWNER_ID not in [a.user.id for a in admins]: await bot.leave_chat(event.chat.id)
         return
 
-    # 2. WELCOME LOGIC (Catches Approved Requests & Direct Joins)
-    # Check if user wasn't a member before, and is a member now
+    # Welcome (Approved & Direct)
     if event.new_chat_member.status == "member" and event.old_chat_member.status != "member":
         user = event.new_chat_member.user
         if not user.is_bot:
@@ -332,8 +349,7 @@ async def on_chat_member_update(event: ChatMemberUpdated):
                     f"👋 <b>Welcome, {user.first_name}!</b> Happy to have you here. 😊\n\n"
                     f"ℹ️ <b>Quick Note:</b> The <b>Group Rules</b> are available in the <b>Group Description (Bio)</b>. Thanks for checking them out!"
                 )
-            except Exception as e:
-                print(f"Welcome Error: {e}")
+            except: pass
 
 @dp.callback_query(lambda c: c.data.startswith("unmute_"))
 async def on_unmute_btn(c: CallbackQuery):
@@ -367,8 +383,8 @@ async def photo_handler(m: types.Message):
         media_group_cache.add(m.media_group_id); asyncio.create_task(clean_media_group_cache(m.media_group_id))
 
     f = await bot.get_file(m.photo[-1].file_id)
-    async with aiohttp.ClientSession() as s:
-        async with s.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}") as r: img = await r.read()
+    async with get_session() as session:
+        async with session.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}") as r: img = await r.read()
 
     # 2. NSFW CHECK
     if NSFW_ENABLED and not is_adm:
@@ -462,7 +478,7 @@ async def text_handler(m: types.Message):
     else:
         spam_counts[m.chat.id].clear(); spam_counts[m.chat.id][user.id] = 1; last_sender[m.chat.id] = user.id
 
-    # 6. Custom Replies
+    # 6. Custom Replies / Identity
     for k, v in REPLIES.items():
         if len(set(text.split()) & set(k.lower().split())) >= 1: return await m.reply(v)
     if any(t in text for t in IDENTITY_TRIGGERS): return await m.reply(IDENTITY_REPLY)
@@ -476,11 +492,18 @@ async def text_handler(m: types.Message):
         await m.reply(await ask_gemini(user.id, m.text, mode))
 
 async def main():
-    print("🚀 Bot Started (Final Perfect Version)")
+    print("🚀 Bot Started (Final Speed Optimized)")
     await find_working_model()
-    if not CURRENT_MODEL: print("❌ CRITICAL: No AI Model found.")
-    logging.basicConfig(level=logging.INFO)
-    await dp.start_polling(bot)
+    
+    # Start cleaner task
+    asyncio.create_task(cleanup_task())
+    
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        if HTTP_SESSION: await HTTP_SESSION.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
