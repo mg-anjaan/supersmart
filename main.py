@@ -343,7 +343,11 @@ async def auto_leave(event: ChatMemberUpdated):
 async def welcome_handler(m: types.Message):
     for user in m.new_chat_members:
         if not user.is_bot:
-            await m.reply(f"👋 <b>Welcome {user.first_name}!</b>\nPlease read the group rules. Enjoy! ✨")
+            new_welcome_message = (
+                f"👋 <b>Welcome, {user.first_name}!</b> Happy to have you here. 😊\n\n"
+                f"ℹ️ <b>Quick Note:</b> The <b>Group Rules</b> are available in the <b>Group Description (Bio)</b>. Thanks for checking them out!"
+            )
+            await m.reply(new_welcome_message)
 
 @dp.callback_query(lambda c: c.data.startswith("unmute_"))
 async def on_unmute_btn(c: CallbackQuery):
