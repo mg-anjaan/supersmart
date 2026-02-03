@@ -81,18 +81,26 @@ def build_pattern(words):
 ABUSE_PATTERN = build_pattern(final_word_list)
 LINK_PATTERN = re.compile(r"(https?://|www\.|t\.me/|telegram\.me/)", re.IGNORECASE)
 
-# ================= UTILS =================
+# ================= UTILS (FIXED ADMIN CHECK) =================
 def get_unmute_kb(user_id):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔓 Unmute User (Admin)", callback_data=f"unmute_{user_id}")]])
 
 def is_owner(user_id): return user_id == OWNER_ID
 
-async def is_admin(chat, user_id):
+async def is_admin(chat, user_id, message=None):
+    # 1. Owner is always Admin
     if user_id == OWNER_ID: return True
+    
+    # 2. Anonymous Admin Check (Sender Chat == Group ID)
+    if message and message.sender_chat and message.sender_chat.id == chat.id:
+        return True
+
+    # 3. Real Admin Check (Member List)
     try:
         m = await chat.get_member(user_id)
         return m.status in ("administrator", "creator")
-    except: return False
+    except:
+        return False
 
 def remember(uid, role, text):
     MEMORY.setdefault(uid, deque(maxlen=6))
@@ -291,14 +299,18 @@ async def unblock_cmd(m):
             CUSTOM_BLOCKED_WORDS.discard(m.text.split(maxsplit=1)[-1].lower())
             await m.reply("✅ Keyword Unblocked.")
 
+# Alias commands
 @dp.message(Command("fadd"))
 async def fadd_cmd(m): await block_cmd(m)
 @dp.message(Command("fdel"))
 async def fdel_cmd(m): await unblock_cmd(m)
 
+# === MUTE/UNMUTE (FIXED FOR ANONYMOUS) ===
 @dp.message(Command("mute"))
 async def mute_cmd(m):
-    if not await is_admin(m.chat, m.from_user.id): return
+    # Pass 'm' to check for Anonymous Admin
+    if not await is_admin(m.chat, m.from_user.id, m): return
+    
     if m.reply_to_message:
         uid = m.reply_to_message.from_user.id
         await m.chat.restrict(uid, permissions=types.ChatPermissions(can_send_messages=False))
@@ -306,7 +318,8 @@ async def mute_cmd(m):
 
 @dp.message(Command("unmute"))
 async def unmute_cmd(m):
-    if not await is_admin(m.chat, m.from_user.id): return
+    if not await is_admin(m.chat, m.from_user.id, m): return
+    
     if m.reply_to_message:
         uid = m.reply_to_message.from_user.id
         await m.chat.restrict(uid, permissions=types.ChatPermissions(
@@ -319,26 +332,23 @@ async def unmute_cmd(m):
 async def help_cmd(m):
     await m.reply("<b>🤖 Commands:</b>\n/ai, /short, /rude, /vision, /nsfw, /respect, /addreply, /block, /mute, /unmute")
 
-# ================= EVENTS & WELCOME (FIXED) =================
-# 1. SECURITY: Auto Leave if Owner not Admin (Status Change)
+# ================= EVENTS =================
 @dp.chat_member()
 async def auto_leave(event: ChatMemberUpdated):
     if event.new_chat_member.user.id == bot.id:
         admins = await bot.get_chat_administrators(event.chat.id)
         if OWNER_ID not in [a.user.id for a in admins]: await bot.leave_chat(event.chat.id)
 
-# 2. WELCOME: Service Message Handler (Works in Private/Public Groups)
 @dp.message(F.new_chat_members)
 async def welcome_handler(m: types.Message):
     for user in m.new_chat_members:
         if not user.is_bot:
-            await m.reply(
-                f"👋 <b>Welcome {user.first_name}!</b>\n"
-                f"Please read the group rules in the bio. Enjoy! ✨"
-            )
+            await m.reply(f"👋 <b>Welcome {user.first_name}!</b>\nPlease read the group rules. Enjoy! ✨")
 
 @dp.callback_query(lambda c: c.data.startswith("unmute_"))
 async def on_unmute_btn(c: CallbackQuery):
+    # For Button Clicks, User is always Real (Even if Anon Admin)
+    # So we check against Real Admin List
     if await is_admin(c.message.chat, c.from_user.id):
         await c.message.chat.restrict(int(c.data.split("_")[1]), permissions=types.ChatPermissions(
             can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True,
