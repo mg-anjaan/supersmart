@@ -51,7 +51,24 @@ RESPECT_USERS = set()
 
 USERBOT_CMD_TRIGGERS = {"raid","spam","ping","eval","exec","repeat","dox","flood","bomb"}
 
-# ================= FULL ABUSIVE WORD LIST (RESTORED) =================
+# ================= UTILITY FUNCTIONS =================
+def normalize_text(s: str) -> str:
+    if not s: return ""
+    s = unicodedata.normalize("NFKD", s)
+    s = re.sub(r'[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff]+', "", s)
+    s = re.sub(r"[^a-z0-9\s]", " ", s.lower())
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def tolerant_pattern(word):
+    return r"[\W_]*".join(re.escape(c) for c in word)
+
+def build_pattern(words):
+    patterns = [tolerant_pattern(w) for w in words]
+    full_regex = r"(?<![A-Za-z0-9])(?:" + "|".join(patterns) + r")(?![A-Za-z0-9])"
+    return re.compile(full_regex, re.IGNORECASE | re.UNICODE)
+
+# FULL LISTS PRESERVED
 hindi_words = [
     "chutiya","madarchod","bhosdike","lund","gand","gaand","randi","behenchod","betichod","mc","bc",
     "lodu","lavde","harami","kutte","kamina","rakhail","randwa","suar","sasura","dogla","saala","tatti","chod","gaandu", "bhnchod","bkl",
@@ -69,35 +86,8 @@ english_words = [
     "blowme","wanker","screw","bollocks","bugger","slag","trollop","arse","arsehole","goddamn",
     "shithead","horniness"
 ]
-family_prefixes = [
-    "teri","teri ki","tera","tera ki","teri maa","teri behen","teri gf","teri sister",
-    "teri maa ki","teri behen ki","gf","bf","mms","bana","banaa","banaya"
-]
-phrases = [
-    "send nudes","horny dm","let's have sex","i am horny","want to fuck",
-    "boobs pics","let’s bang","video call nude","send pic without cloth",
-    "suck my","blow me","deep throat","show tits","open boobs","send nude",
-    "you are hot send pic","show your body","let's do sex","horny girl","horny boy",
-    "come to bed","nude video call","i want sex","let me fuck","sex chat","do sex with me",
-    "send xxx","share porn","watch porn together","send your nude"
-]
-
-# ================= UTILITY FUNCTIONS =================
-def normalize_text(s: str) -> str:
-    if not s: return ""
-    s = unicodedata.normalize("NFKD", s)
-    s = re.sub(r'[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff]+', "", s)
-    s = re.sub(r"[^a-z0-9\s]", " ", s.lower())
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def tolerant_pattern(word):
-    return r"[\W_]*".join(re.escape(c) for c in word)
-
-def build_pattern(words):
-    patterns = [tolerant_pattern(w) for w in words]
-    full_regex = r"(?<![A-Za-z0-9])(?:" + "|".join(patterns) + r")(?![A-Za-z0-9])"
-    return re.compile(full_regex, re.IGNORECASE | re.UNICODE)
+family_prefixes = ["teri","teri ki","tera","tera ki","teri maa","teri behen","teri gf","teri sister","teri maa ki","teri behen ki","gf","bf","mms","bana","banaa","banaya"]
+phrases = ["send nudes","horny dm","let's have sex","i am horny","want to fuck","boobs pics","let’s bang","video call nude","send pic without cloth","suck my","blow me","deep throat","show tits","open boobs","send nude","you are hot send pic","show your body","let's do sex","horny girl","horny boy","come to bed","nude video call","i want sex","let me fuck","sex chat","do sex with me","send xxx","share porn","watch porn together","send your nude"]
 
 combined_words = hindi_words + english_words
 combo_words = [f"{p} {c}" for p in family_prefixes for c in combined_words]
@@ -162,7 +152,7 @@ async def ask_gemini_direct(uid, text, mode="normal"):
                 return "⚠️ AI Error."
     except: return "⚠️ Connection Error"
 
-# ✅ FAST NSFW CHECK (Detects Blocks & Refusals)
+# ✅ FAST NSFW CHECK
 async def is_nsfw_direct(img_bytes: bytes) -> bool:
     if not CURRENT_MODEL: return False
     import base64
@@ -178,21 +168,14 @@ async def is_nsfw_direct(img_bytes: bytes) -> bool:
             async with session.post(url, json=payload) as response:
                 data = await response.json()
                 
-                # 1. Did Google BLOCK the response? (Means severe porn)
-                if data.get("promptFeedback", {}).get("blockReason") == "SAFETY":
-                    return True
-                
-                # 2. Did it finish early due to safety?
-                if data.get("candidates") and data["candidates"][0].get("finishReason") == "SAFETY":
-                    return True
+                if data.get("promptFeedback", {}).get("blockReason") == "SAFETY": return True
+                if data.get("candidates") and data["candidates"][0].get("finishReason") == "SAFETY": return True
 
-                # 3. Check Safety Ratings
                 ratings = data.get("candidates", [{}])[0].get("safetyRatings", [])
                 for r in ratings:
                     if r["category"] == "HARM_CATEGORY_SEXUALLY_EXPLICIT" and r["probability"] in ["HIGH", "MEDIUM"]:
                         return True
                 
-                # 4. Check Text Response
                 if data.get("candidates"):
                     text = data["candidates"][0]["content"]["parts"][0]["text"].lower()
                     if "yes" in text: return True
@@ -233,31 +216,49 @@ async def is_admin(chat, user_id):
         return m.status in ("administrator", "creator") or user_id == OWNER_ID
     except: return False
 
-# --- CONFIG COMMANDS ---
+# --- CONFIG COMMANDS (FIXED TOGGLES) ---
+# Helper to check "on" or "off" explicitly
+def get_toggle_state(text, current_state):
+    args = text.lower().split()
+    if len(args) > 1:
+        if args[1] == "on": return True
+        if args[1] == "off": return False
+    return current_state # No change if invalid input
+
 @dp.message(Command("ai"))
 async def set_ai(m: aiogram_types.Message):
     global AI_ENABLED
-    if is_owner(m.from_user.id): AI_ENABLED = "on" in m.text.lower(); await m.reply(f"AI: {AI_ENABLED}")
+    if is_owner(m.from_user.id): 
+        AI_ENABLED = get_toggle_state(m.text, AI_ENABLED)
+        await m.reply(f"✅ AI: {AI_ENABLED}")
 
 @dp.message(Command("rude"))
 async def set_rude(m: aiogram_types.Message):
     global RUDE_MODE
-    if is_owner(m.from_user.id): RUDE_MODE = "on" in m.text.lower(); await m.reply(f"Rude: {RUDE_MODE}")
+    if is_owner(m.from_user.id): 
+        RUDE_MODE = get_toggle_state(m.text, RUDE_MODE)
+        await m.reply(f"😈 Rude Mode: {RUDE_MODE}")
 
 @dp.message(Command("short"))
 async def set_short(m: aiogram_types.Message):
     global SHORT_MODE
-    if is_owner(m.from_user.id): SHORT_MODE = "on" in m.text.lower(); await m.reply(f"Short: {SHORT_MODE}")
+    if is_owner(m.from_user.id): 
+        SHORT_MODE = get_toggle_state(m.text, SHORT_MODE)
+        await m.reply(f"Short Mode: {SHORT_MODE}")
 
 @dp.message(Command("vision"))
 async def set_vision(m: aiogram_types.Message):
     global VISION_ENABLED
-    if is_owner(m.from_user.id): VISION_ENABLED = "on" in m.text.lower(); await m.reply(f"Vision: {VISION_ENABLED}")
+    if is_owner(m.from_user.id): 
+        VISION_ENABLED = get_toggle_state(m.text, VISION_ENABLED)
+        await m.reply(f"👁️ Vision: {VISION_ENABLED}")
 
 @dp.message(Command("nsfw"))
 async def set_nsfw(m: aiogram_types.Message):
     global NSFW_ENABLED
-    if is_owner(m.from_user.id): NSFW_ENABLED = "on" in m.text.lower(); await m.reply(f"NSFW: {NSFW_ENABLED}")
+    if is_owner(m.from_user.id): 
+        NSFW_ENABLED = get_toggle_state(m.text, NSFW_ENABLED)
+        await m.reply(f"🛡️ NSFW Check: {NSFW_ENABLED}")
 
 @dp.message(Command("addreply"))
 async def add_reply(m: aiogram_types.Message):
@@ -339,15 +340,15 @@ async def on_photo(m: aiogram_types.Message):
     async with aiohttp.ClientSession() as s:
         async with s.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}") as r: img = await r.read()
 
-    # Priority 1: NSFW Check (Delete + Mute)
+    # 1. INDEPENDENT NSFW CHECK
     if NSFW_ENABLED:
         if await is_nsfw_direct(img):
             await m.delete()
             await m.chat.restrict(m.from_user.id, permissions=aiogram_types.ChatPermissions(can_send_messages=False))
             await m.answer(f"🚫 <b>{m.from_user.first_name}</b> muted (NSFW).", reply_markup=get_unmute_kb(m.from_user.id))
-            return
+            return # Stop processing this image
 
-    # Priority 2: Vision Comment (Only if Safe)
+    # 2. INDEPENDENT VISION COMMENT (Only if enabled and NOT nsfw)
     if VISION_ENABLED and (m.caption is None or "@" in m.caption or m.reply_to_message):
         comment = await ask_vision_direct(img)
         if comment: await m.reply(comment)
