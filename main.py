@@ -46,10 +46,11 @@ RESPECT_USERS = set()
 USERBOT_CMD_TRIGGERS = {"raid","spam","ping","eval","exec","repeat","dox","flood","bomb"}
 
 # ================= UTILITY FUNCTIONS =================
-# (Keeping your original word lists logic mostly generic for space, but logic remains same)
+# Shortened word lists for brevity - logic remains identical
 hindi_words = ["chutiya","madarchod","bhosdike","lund","gand","bc","mc","bsdk","bhosri"]
 english_words = ["fuck","bitch","asshole","sex","porn","dick","pussy","nude"]
-# ... (Assume full list is here as per previous code) ...
+family_prefixes = ["teri","teri ki","tera","teri maa","teri behen","gf","bf"]
+phrases = ["send nudes","horny","sex","fuck"]
 
 def normalize_text(s: str) -> str:
     if not s: return ""
@@ -67,7 +68,6 @@ def build_pattern(words):
     full_regex = r"(?<![A-Za-z0-9])(?:" + "|".join(patterns) + r")(?![A-Za-z0-9])"
     return re.compile(full_regex, re.IGNORECASE | re.UNICODE)
 
-# Combine lists (Simplified for brevity, use your full lists)
 full_word_list = hindi_words + english_words
 ABUSE_PATTERN = build_pattern(full_word_list)
 
@@ -76,25 +76,28 @@ LINK_PATTERN = re.compile(r"(https?://|www\.|t\.me/|telegram\.me/)", re.IGNORECA
 def get_unmute_kb(user_id):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔓 Unmute User", callback_data=f"unmute_{user_id}")]])
 
-# --- ROBUST DIRECT API CALLS ---
+# --- FIXED API CALLER (v1 Stable Endpoint) ---
 def remember(uid, role, text):
     MEMORY.setdefault(uid, deque(maxlen=6))
     MEMORY[uid].append(f"{role}: {text}")
 
 async def call_gemini_api(payload, model_name):
-    """Sends raw HTTP request to Google."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+    # ✅ FIX: Using 'v1' endpoint instead of 'v1beta'
+    url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload) as response:
                 result = await response.json()
-                if response.status != 200:
-                    logging.error(f"⚠️ {model_name} Failed: {result}")
-                    return None
-                return result
+                
+                if response.status == 200:
+                    return result
+                
+                logging.error(f"⚠️ {model_name} (v1) Error: {result}")
     except Exception as e:
         logging.error(f"❌ Connection Error: {e}")
-        return None
+            
+    return None
 
 async def ask_gemini_direct(uid, text, mode="normal"):
     remember(uid, "user", text)
@@ -116,8 +119,9 @@ async def ask_gemini_direct(uid, text, mode="normal"):
         ]
     }
 
-    # 🔥 THE UNIVERSAL FIX: Try 3 different models in order
-    models_to_try = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.0-pro"]
+    # 🔥 STRATEGY: Try Flash (Vision+Text) -> Then Pro (Text Only)
+    # This tries to save your Vision features first.
+    models_to_try = ["gemini-1.5-flash", "gemini-pro"]
     
     for model in models_to_try:
         data = await call_gemini_api(payload, model)
@@ -127,9 +131,9 @@ async def ask_gemini_direct(uid, text, mode="normal"):
                 remember(uid, "assistant", reply)
                 return reply
             except:
-                continue # Try next model if format is weird
+                continue
 
-    return "⚠️ AI Unavailable (API Key Issue). Check Logs."
+    return "⚠️ AI Error: Key invalid or Region Blocked."
 
 async def is_nsfw_direct(img_bytes: bytes) -> bool:
     import base64
@@ -138,13 +142,16 @@ async def is_nsfw_direct(img_bytes: bytes) -> bool:
         "contents": [{"parts": [{"text": "Answer YES only if nude/porn. NO otherwise."}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}]}],
         "safetySettings": [{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"}]
     }
-    # Vision works best on Flash or Pro Vision
-    for model in ["gemini-1.5-flash", "gemini-pro-vision"]:
-        data = await call_gemini_api(payload, model)
-        if data and "candidates" in data:
-            try:
-                return "yes" in data["candidates"][0]["content"]["parts"][0]["text"].lower()
-            except: continue
+    
+    # Try Flash first (Supports images on v1)
+    data = await call_gemini_api(payload, "gemini-1.5-flash")
+    
+    if data and "candidates" in data:
+        try:
+            return "yes" in data["candidates"][0]["content"]["parts"][0]["text"].lower()
+        except: 
+            pass
+            
     return False
 
 async def ask_vision_direct(img_bytes: bytes) -> str:
@@ -153,12 +160,15 @@ async def ask_vision_direct(img_bytes: bytes) -> str:
     payload = {
         "contents": [{"parts": [{"text": "Comment on this image."}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}]}],
     }
-    for model in ["gemini-1.5-flash", "gemini-pro-vision"]:
-        data = await call_gemini_api(payload, model)
-        if data and "candidates" in data:
-            try:
-                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            except: continue
+    
+    data = await call_gemini_api(payload, "gemini-1.5-flash")
+    
+    if data and "candidates" in data:
+        try:
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except: 
+            pass
+            
     return ""
 
 # --- CHECKS ---
@@ -173,7 +183,7 @@ async def is_admin(chat, user_id):
 
 @dp.message(CommandStart())
 async def start_cmd(m: aiogram_types.Message):
-    await m.answer("🤖 <b>Bot Online!</b>\nSecurity + Gemini AI (Universal Mode)")
+    await m.answer("🤖 <b>Bot Online!</b>\nSecurity + Gemini AI (v1 Stable)")
 
 @dp.message(Command("help"))
 async def help_cmd(m: aiogram_types.Message):
@@ -238,12 +248,10 @@ async def list_cmd(m: aiogram_types.Message):
 # --- CORE LOGIC ---
 @dp.chat_member()
 async def on_join(event: ChatMemberUpdated):
-    # Auto Leave
     if event.new_chat_member.user.id == bot.id:
         admins = await bot.get_chat_administrators(event.chat.id)
         if OWNER_ID not in [a.user.id for a in admins]: await bot.leave_chat(event.chat.id)
     
-    # Welcome (Strict Fix)
     if event.new_chat_member.status == "member" and event.old_chat_member.status != "restricted":
         if not event.new_chat_member.user.is_bot:
             await bot.send_message(event.chat.id, f"👋 Welcome {event.new_chat_member.user.first_name}!")
@@ -257,28 +265,23 @@ async def on_unmute(c: CallbackQuery):
 
 @dp.message(F.photo)
 async def on_photo(m: aiogram_types.Message):
-    # Security
     if m.chat.type in ["group", "supergroup"] and not await is_admin(m.chat, m.from_user.id):
         if m.forward_origin: await m.delete(); return
     
-    # Media Group Cache
     if m.media_group_id:
         if m.media_group_id in media_group_cache: return
         media_group_cache.add(m.media_group_id); asyncio.create_task(clean_cache(m.media_group_id)); await asyncio.sleep(1)
 
-    # Download
     f = await bot.get_file(m.photo[-1].file_id)
     async with aiohttp.ClientSession() as s:
         async with s.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}") as r: img = await r.read()
 
-    # NSFW
     if NSFW_ENABLED and await is_nsfw_direct(img):
         await m.delete()
         await m.chat.restrict(m.from_user.id, permissions=aiogram_types.ChatPermissions(can_send_messages=False))
         await m.answer(f"🚫 {m.from_user.first_name} muted (NSFW).", reply_markup=get_unmute_kb(m.from_user.id))
         return
 
-    # Vision
     if VISION_ENABLED and (m.caption is None or "@" in m.caption or m.reply_to_message):
         await m.reply(await ask_vision_direct(img))
 
@@ -291,7 +294,6 @@ async def on_text(m: aiogram_types.Message):
     text = m.text.strip()
     is_adm = await is_admin(m.chat, user.id)
 
-    # Add Reply
     if user.id in ADD_REPLY_STATE:
         if "key" not in ADD_REPLY_STATE[user.id]:
             ADD_REPLY_STATE[user.id]["key"] = text.lower(); await m.reply("Now send reply")
@@ -299,21 +301,16 @@ async def on_text(m: aiogram_types.Message):
             REPLIES[ADD_REPLY_STATE[user.id]["key"]] = text; ADD_REPLY_STATE.pop(user.id); await m.reply("Saved")
         return
 
-    # Security
     if not is_adm:
-        # Userbot
         if text.startswith((".", "/")):
             cmd = text[1:].split()[0].lower()
             if cmd in USERBOT_CMD_TRIGGERS:
                 await m.delete(); await m.chat.restrict(user.id, permissions=aiogram_types.ChatPermissions(can_send_messages=False))
                 await m.answer(f"⚠️ {user.first_name} muted (Command).", reply_markup=get_unmute_kb(user.id)); return
-        # Links/Forward
         if m.forward_origin or LINK_PATTERN.search(text): await m.delete(); return
-        # Abuse
         if ABUSE_PATTERN.search(text):
             await m.delete(); await m.chat.restrict(user.id, permissions=aiogram_types.ChatPermissions(can_send_messages=False))
             await m.answer(f"🚫 {user.first_name} muted (Abuse).", reply_markup=get_unmute_kb(user.id)); return
-        # Spam
         last = last_sender[m.chat.id]
         if last == user.id:
             spam_counts[m.chat.id][user.id] += 1
@@ -324,7 +321,6 @@ async def on_text(m: aiogram_types.Message):
         else:
             spam_counts[m.chat.id].clear(); spam_counts[m.chat.id][user.id] = 1; last_sender[m.chat.id] = user.id
 
-    # AI Logic
     if any(w in text.lower() for w in BLOCKED_WORDS_AI): return
     if text.lower() in REPLIES: await m.reply(REPLIES[text.lower()]); return
 
@@ -334,7 +330,7 @@ async def on_text(m: aiogram_types.Message):
         await m.reply(await ask_gemini_direct(user.id, text, mode))
 
 async def main():
-    print("🚀 Bot Started (Universal Mode)")
+    print("🚀 Bot Started (v1 Stable Mode)")
     logging.basicConfig(level=logging.INFO)
     await dp.start_polling(bot)
 
