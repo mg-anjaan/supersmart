@@ -39,7 +39,6 @@ CURRENT_MODEL = None
 HTTP_SESSION = None # Reusable connection
 
 # ================= DATA =================
-# Memory stores last 6 messages PER USER ID (Context Isolation)
 MEMORY = defaultdict(lambda: deque(maxlen=6)) 
 ADD_REPLY_STATE = {}
 REPLIES = {}
@@ -99,7 +98,6 @@ async def is_admin(chat, user_id, message=None):
     except: return False
 
 def remember(uid, role, text):
-    # This stores data in a unique list for EACH user ID
     MEMORY[uid].append(f"{role}: {text}")
 
 async def safe_delete(message):
@@ -110,7 +108,6 @@ async def clean_media_group_cache(mid):
     await asyncio.sleep(15)
     media_group_cache.discard(mid)
 
-# 🧹 BACKGROUND CLEANER
 async def cleanup_task():
     while True:
         await asyncio.sleep(600) 
@@ -152,15 +149,13 @@ async def find_working_model():
 async def ask_gemini(uid, text, mode="normal"):
     if not CURRENT_MODEL: return "⚠️ AI Failed."
     
-    # Context Management
+    remember(uid, "user", text)
     history_text = "\n".join(MEMORY[uid])
-    
-    # 🛑 SYSTEM INSTRUCTION (FIXED TO PREVENT REPEATING)
+
     base_prompt = (
         "You are a human-like Telegram user. "
         "Strict Rule: DO NOT repeat the user's message. ANSWER the message directly. "
         "Detect the user's language and reply in the EXACT SAME language. "
-        "English -> English. Hindi -> Hindi. Hinglish -> Hinglish. "
         "Never prefix replies with 'System:', 'Assistant:', or 'Bot:'. "
     )
 
@@ -173,12 +168,11 @@ async def ask_gemini(uid, text, mode="normal"):
             sys = base_prompt + "Witty roaster. Reply ONLY in Hinglish. Savage. Max 2 lines. Roast them."
         else: 
             sys = base_prompt + "Helpful but extremely concise. Max 1-2 sentences. Answer directly."
-    else: # Normal (Long Mode)
-        sys = base_prompt + "Be casual, friendly, and helpful. Chat naturally like a friend. Give a proper answer."
+    else: # Normal (Detailed Mode)
+        sys = base_prompt + "Be casual, friendly, and helpful. Chat naturally. Give a DETAILED and COMPLETE answer. Do not cut it short."
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{CURRENT_MODEL}:generateContent?key={GEMINI_API_KEY}"
     
-    # ✅ FIX: Sending Chat History + New Prompt correctly
     payload = {
         "contents": [
             {"parts": [{"text": f"System Instruction: {sys}\n\nChat History:\n{history_text}\n\nUser: {text}\nAssistant:"}]}
@@ -191,15 +185,11 @@ async def ask_gemini(uid, text, mode="normal"):
             result = await response.json()
             if response.status == 200 and "candidates" in result:
                 reply = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-                
-                # Clean Prefixes
                 prefixes = ["system:", "assistant:", "bot:", "ai:", "user:"]
                 for p in prefixes:
                     if reply.lower().startswith(p): reply = reply[len(p):].strip()
                 
-                # Store Conversation
-                remember(uid, "User", text)
-                remember(uid, "Assistant", reply)
+                remember(uid, "assistant", reply)
                 return reply
             return "⚠️ AI Error."
     except: return "⚠️ Connection Error"
@@ -328,6 +318,7 @@ async def fadd_cmd(m): await block_cmd(m)
 @dp.message(Command("fdel"))
 async def fdel_cmd(m): await unblock_cmd(m)
 
+# === MUTE/UNMUTE/BAN/UNBAN ===
 @dp.message(Command("mute"))
 async def mute_cmd(m):
     if not await is_admin(m.chat, m.from_user.id, m): return
@@ -347,9 +338,27 @@ async def unmute_cmd(m):
         ))
         await m.reply(f"✅ Unmuted {m.reply_to_message.from_user.first_name}")
 
+@dp.message(Command("ban"))
+async def ban_cmd(m):
+    if not await is_admin(m.chat, m.from_user.id, m): return
+    if not m.reply_to_message: return await m.reply("Reply to user")
+    try:
+        await m.chat.ban(m.reply_to_message.from_user.id)
+        await m.reply(f"🚫 <b>{m.reply_to_message.from_user.first_name}</b> has been Banned.")
+    except Exception as e: await m.reply(f"❌ Error: {e}")
+
+@dp.message(Command("unban"))
+async def unban_cmd(m):
+    if not await is_admin(m.chat, m.from_user.id, m): return
+    if not m.reply_to_message: return await m.reply("Reply to user")
+    try:
+        await m.chat.unban(m.reply_to_message.from_user.id)
+        await m.reply(f"✅ <b>{m.reply_to_message.from_user.first_name}</b> has been Unbanned.")
+    except Exception as e: await m.reply(f"❌ Error: {e}")
+
 @dp.message(Command("help"))
 async def help_cmd(m):
-    await m.reply("<b>🤖 Commands:</b>\n/ai, /short, /rude, /vision, /nsfw, /respect, /addreply, /block, /mute, /unmute")
+    await m.reply("<b>🤖 Commands:</b>\n/ai, /short, /rude, /vision, /nsfw, /respect, /addreply, /block, /mute, /unmute, /ban, /unban")
 
 # ================= EVENTS =================
 @dp.chat_member()
@@ -360,7 +369,9 @@ async def on_chat_member_update(event: ChatMemberUpdated):
         if OWNER_ID not in [a.user.id for a in admins]: await bot.leave_chat(event.chat.id)
         return
 
-    # Welcome (Approved & Direct)
+    # Welcome (Ignore Unmute, Only Join)
+    if event.old_chat_member.status == "restricted" and event.new_chat_member.status == "member": return 
+
     if event.new_chat_member.status == "member" and event.old_chat_member.status != "member":
         user = event.new_chat_member.user
         if not user.is_bot:
