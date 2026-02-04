@@ -36,7 +36,7 @@ NSFW_ENABLED = True
 
 # ACTIVE MODEL
 CURRENT_MODEL = None 
-HTTP_SESSION = None # Reusable connection
+HTTP_SESSION = None 
 
 # ================= DATA =================
 MEMORY = defaultdict(lambda: deque(maxlen=6)) 
@@ -66,7 +66,72 @@ IDENTITY_TRIGGERS = [
 CUSTOM_BLOCK_REPLY = "🚫 MG Anjaan Rahi has restricted me to answer this."
 ABUSE_BLOCK_REPLY = "🚫 <b>Abusive/Offensive language is not allowed.</b>"
 
-# ================= FULL ABUSE LIST =================
+# ================= ADVANCED ABUSE DETECTION LOGIC =================
+
+# 1. Normalizer (Fancy Font -> Normal Text)
+def normalize_text(s: str) -> str:
+    if not s: return ""
+    
+    # Step 1: Standard Normalize
+    s = unicodedata.normalize("NFKD", s)
+    s = re.sub(r'[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff]+', "", s) # Remove accents
+
+    # Step 2: Custom Char Map for tricky symbols
+    EXTRA_CHAR_MAP = {
+        "©": "c", "ʋ": "u", "ʌ": "u", "ν": "u", "ⅴ": "v", "v̇": "v",
+        "ɯ": "m", "ɡ": "g", "ɩ": "i", "ɪ": "i", "ʜ": "h", "ᴜ": "u", "ᴛ": "t", "ᴠ": "v",
+        "ᴡ": "w", "ᴋ": "k", "ḩ": "h", "ů": "u", "ŧ": "t", "ꜱ": "s", "ᴄ": "c", "ᴀ": "a",
+        "ʙ": "b", "ᴅ": "d", "ᴇ": "e", "ꜰ": "f", "ɢ": "g", "ʟ": "l", "ᴍ": "m", "ɴ": "n",
+        "ᴏ": "o", "ᴘ": "p", "ᴊ": "j", "ʀ": "r", "ᴢ": "z", "ʏ": "y", "@": "a", "$": "s",
+        "(": "", ")": "", "[": "", "]": "", "{": "", "}": ""
+    }
+    
+    mapped_chars = []
+    for ch in s:
+        # Check custom map
+        if ch in EXTRA_CHAR_MAP:
+            mapped_chars.append(EXTRA_CHAR_MAP[ch])
+            continue
+        
+        # Check Unicode Name (e.g., "MATHEMATICAL BOLD CAPITAL A")
+        try:
+            name = unicodedata.name(ch, "")
+            if any(tag in name for tag in ("MATHEMATICAL", "FULLWIDTH", "CIRCLED", "DOUBLE-STRUCK", "SQUARED", "MONOSPACE", "BOLD", "ITALIC", "SCRIPT")):
+                parts = name.split()
+                # Find the letter in the name (usually the last word)
+                for token in reversed(parts):
+                    if len(token) == 1 and token.isalpha():
+                        mapped_chars.append(token.lower())
+                        break
+                else:
+                    mapped_chars.append(" ") # Spacer if not a letter
+            elif ord(ch) < 128:
+                mapped_chars.append(ch.lower()) # Normal ASCII
+            else:
+                mapped_chars.append(" ") # Unknown symbol -> Space
+        except:
+            mapped_chars.append(ch.lower())
+
+    s = "".join(mapped_chars)
+    # Remove non-alphanumeric but keep spaces
+    s = re.sub(r"[^a-z0-9\s]", "", s)
+    # Collapse multiple spaces/chars (e.g., "heeeello" -> "hello")
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"(.)\1{2,}", r"\1\1", s) 
+    return s
+
+# 2. Regex Builder (Inserts [\W_]* between chars)
+def tolerant_pattern(word): 
+    # Create pattern: f[\W_]*u[\W_]*c[\W_]*k
+    return r"[\W_]*".join(re.escape(c) for c in word)
+
+def build_pattern(words):
+    patterns = [tolerant_pattern(w) for w in words]
+    # Lookbehind/Lookahead to ensure we match whole words mostly
+    full_regex = r"(?<![A-Za-z0-9])(?:" + "|".join(patterns) + r")(?![A-Za-z0-9])"
+    return re.compile(full_regex, re.IGNORECASE | re.UNICODE)
+
+# ================= ABUSE LIST =================
 hindi_words = ["chutiya","madarchod","bhosdike","lund","gand","gaand","randi","behenchod","betichod","mc","bc","lodu","lavde","harami","kutte","kamina","rakhail","randwa","suar","sasura","dogla","saala","tatti","chod","gaandu","bhnchod","bkl","chodne","rundi","bhadwe","nalayak","kamine","chinal","bhand","bhen ke","loda","lode","randi","maa ke","behn ke","gandu","chodna","choot","chut","chutmarike","chutiyapa","hijda","launda","laundiya","lavda","bevda","nashedi","raand","kutti","kuttiya","haramzada","haramzadi","bhosri","bhosriwali","rand","mehnchod"]
 english_words = ["fuck","fucking","motherfucker","bitch","asshole","slut","porn","dick","pussy","sex","boobs","cock","suck","fucker","whore","bastard","jerk","hoe","pervert","screwed","scumbag","balls","blowjob","handjob","cum","sperm","vagina","dildo","horny","bang","banging","anal","nude","nsfw","shit","damn","dumbass","retard","piss","douche","milf","boob","ass","booby","breast","naked","deepthroat","suckmy","gay","lesbian","trans","blow","spank","fetish","orgasm","wetdream","masturbate","moan","ejaculate","strip","whack","nipple","cumshot","lick","spitroast","tits","tit","hooker","escort","prostitute","blowme","wanker","screw","bollocks","bugger","slag","trollop","arse","arsehole","goddamn","shithead","horniness"]
 family_prefixes = ["teri","teri ki","tera","tera ki","teri maa","teri behen","teri gf","teri sister","teri maa ki","teri behen ki","gf","bf","mms","bana","banaa","banaya"]
@@ -74,12 +139,7 @@ combined_words = hindi_words + english_words
 combo_words = [f"{p} {c}" for p in family_prefixes for c in combined_words]
 final_word_list = combined_words + combo_words
 
-def tolerant_pattern(word): return r"[\W_]*".join(re.escape(c) for c in word)
-def build_pattern(words):
-    patterns = [tolerant_pattern(w) for w in words]
-    full_regex = r"(?<![A-Za-z0-9])(?:" + "|".join(patterns) + r")(?![A-Za-z0-9])"
-    return re.compile(full_regex, re.IGNORECASE | re.UNICODE)
-
+# Build the Master Regex
 ABUSE_PATTERN = build_pattern(final_word_list)
 LINK_PATTERN = re.compile(r"(https?://|www\.|t\.me/|telegram\.me/)", re.IGNORECASE)
 
@@ -188,7 +248,6 @@ async def ask_gemini(uid, text, mode="normal"):
                 prefixes = ["system:", "assistant:", "bot:", "ai:", "user:"]
                 for p in prefixes:
                     if reply.lower().startswith(p): reply = reply[len(p):].strip()
-                
                 remember(uid, "assistant", reply)
                 return reply
             return "⚠️ AI Error."
@@ -369,7 +428,7 @@ async def on_chat_member_update(event: ChatMemberUpdated):
         if OWNER_ID not in [a.user.id for a in admins]: await bot.leave_chat(event.chat.id)
         return
 
-    # Welcome (Ignore Unmute, Only Join)
+    # Welcome Logic (Ignore Unmute)
     if event.old_chat_member.status == "restricted" and event.new_chat_member.status == "member": return 
 
     if event.new_chat_member.status == "member" and event.old_chat_member.status != "member":
@@ -415,7 +474,6 @@ async def photo_handler(m: types.Message):
         media_group_cache.add(m.media_group_id); asyncio.create_task(clean_media_group_cache(m.media_group_id))
 
     f = await bot.get_file(m.photo[-1].file_id)
-    # FIX: Correct usage of shared session
     session = await get_session()
     async with session.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}") as r: img = await r.read()
 
@@ -437,7 +495,8 @@ async def photo_handler(m: types.Message):
 @dp.message(F.text)
 async def text_handler(m: types.Message):
     user = m.from_user
-    text = m.text.lower()
+    # Normalize fancy fonts
+    text = normalize_text(m.text)
     
     is_anon = m.sender_chat and m.sender_chat.id == m.chat.id
     is_adm = (user and await is_admin(m.chat, user.id)) or is_anon
@@ -448,8 +507,8 @@ async def text_handler(m: types.Message):
         last_sender[m.chat.id] = None
         
         bot_me = await bot.get_me()
-        if AI_ENABLED and ((m.reply_to_message and m.reply_to_message.from_user.id == bot_me.id) or (f"@{bot_me.username.lower()}" in text)):
-             mode = "boss" if is_owner(user.id if user else 0) else "normal"
+        if AI_ENABLED and ((m.reply_to_message and m.reply_to_message.from_user.id == bot_me.id) or (f"@{bot_me.username.lower()}" in m.text.lower())):
+             mode = "boss" if is_owner(user.id if user else 0) else ("short" if SHORT_MODE else "normal")
              await m.reply(await ask_gemini(user.id if user else 0, m.text, mode))
         return
 
@@ -518,7 +577,7 @@ async def text_handler(m: types.Message):
 
     # 7. AI Response
     bot_me = await bot.get_me()
-    if AI_ENABLED and ((m.reply_to_message and m.reply_to_message.from_user.id == bot_me.id) or (f"@{bot_me.username.lower()}" in text)):
+    if AI_ENABLED and ((m.reply_to_message and m.reply_to_message.from_user.id == bot_me.id) or (f"@{bot_me.username.lower()}" in m.text.lower())):
         spam_counts[m.chat.id][user.id] = 0
         mode = "boss" if is_owner(user.id) else ("short" if SHORT_MODE else "normal")
         if user.id in RESPECT_USERS: mode = "respect"
