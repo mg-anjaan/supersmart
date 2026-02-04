@@ -152,25 +152,38 @@ async def find_working_model():
 async def ask_gemini(uid, text, mode="normal"):
     if not CURRENT_MODEL: return "⚠️ AI Failed."
     
-    # Isolate Context: Only load THIS user's history
-    remember(uid, "user", text)
+    # Context Management
     history_text = "\n".join(MEMORY[uid])
-
+    
+    # 🛑 SYSTEM INSTRUCTION (FIXED TO PREVENT REPEATING)
     base_prompt = (
-        "You are a human-like user. Detect language and match it exactly. "
+        "You are a human-like Telegram user. "
+        "Strict Rule: DO NOT repeat the user's message. ANSWER the message directly. "
+        "Detect the user's language and reply in the EXACT SAME language. "
         "English -> English. Hindi -> Hindi. Hinglish -> Hinglish. "
         "Never prefix replies with 'System:', 'Assistant:', or 'Bot:'. "
     )
 
-    if mode == "boss": sys = base_prompt + "Speak to OWNER ('Boss'). Be professional, loyal, concise."
-    elif mode == "respect": sys = base_prompt + "Be extremely polite ('Madam'/'Sir'). Soft-spoken."
+    if mode == "boss": 
+        sys = base_prompt + "Speak to OWNER ('Boss'). Be professional, loyal, concise. Answer directly."
+    elif mode == "respect": 
+        sys = base_prompt + "Be extremely polite ('Madam'/'Sir'). Soft-spoken. Answer directly."
     elif mode == "short":
-        if RUDE_MODE: sys = base_prompt + "Witty roaster. Reply ONLY in Hinglish. Savage. Max 2 lines."
-        else: sys = base_prompt + "Helpful but concise. Max 1-2 sentences."
-    else: sys = base_prompt + "Casual, friendly, chatty like a friend."
+        if RUDE_MODE: 
+            sys = base_prompt + "Witty roaster. Reply ONLY in Hinglish. Savage. Max 2 lines. Roast them."
+        else: 
+            sys = base_prompt + "Helpful but extremely concise. Max 1-2 sentences. Answer directly."
+    else: # Normal (Long Mode)
+        sys = base_prompt + "Be casual, friendly, and helpful. Chat naturally like a friend. Give a proper answer."
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{CURRENT_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    payload = {"contents": [{"parts": [{"text": f"System Instruction: {sys}\nConversation History:\n{history_text}"}]}]}
+    
+    # ✅ FIX: Sending Chat History + New Prompt correctly
+    payload = {
+        "contents": [
+            {"parts": [{"text": f"System Instruction: {sys}\n\nChat History:\n{history_text}\n\nUser: {text}\nAssistant:"}]}
+        ]
+    }
     
     try:
         session = await get_session()
@@ -178,10 +191,15 @@ async def ask_gemini(uid, text, mode="normal"):
             result = await response.json()
             if response.status == 200 and "candidates" in result:
                 reply = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-                prefixes = ["system:", "assistant:", "bot:", "ai:"]
+                
+                # Clean Prefixes
+                prefixes = ["system:", "assistant:", "bot:", "ai:", "user:"]
                 for p in prefixes:
                     if reply.lower().startswith(p): reply = reply[len(p):].strip()
-                remember(uid, "assistant", reply)
+                
+                # Store Conversation
+                remember(uid, "User", text)
+                remember(uid, "Assistant", reply)
                 return reply
             return "⚠️ AI Error."
     except: return "⚠️ Connection Error"
