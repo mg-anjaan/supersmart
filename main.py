@@ -39,7 +39,8 @@ CURRENT_MODEL = None
 HTTP_SESSION = None # Reusable connection
 
 # ================= DATA =================
-MEMORY = defaultdict(lambda: deque(maxlen=6)) # Limit memory history automatically
+# Memory stores last 6 messages PER USER ID (Context Isolation)
+MEMORY = defaultdict(lambda: deque(maxlen=6)) 
 ADD_REPLY_STATE = {}
 REPLIES = {}
 CUSTOM_BLOCKED_WORDS = set() 
@@ -98,6 +99,7 @@ async def is_admin(chat, user_id, message=None):
     except: return False
 
 def remember(uid, role, text):
+    # This stores data in a unique list for EACH user ID
     MEMORY[uid].append(f"{role}: {text}")
 
 async def safe_delete(message):
@@ -108,14 +110,13 @@ async def clean_media_group_cache(mid):
     await asyncio.sleep(15)
     media_group_cache.discard(mid)
 
-# 🧹 BACKGROUND CLEANER (PREVENTS RAILWAY CRASH)
+# 🧹 BACKGROUND CLEANER
 async def cleanup_task():
     while True:
-        await asyncio.sleep(600) # Every 10 mins
+        await asyncio.sleep(600) 
         spam_counts.clear()
         flood_cache.clear()
         last_sender.clear()
-        # Keep recent memory only
         if len(MEMORY) > 500:
             keys_to_del = list(MEMORY.keys())[:-100]
             for k in keys_to_del: del MEMORY[k]
@@ -150,6 +151,8 @@ async def find_working_model():
 
 async def ask_gemini(uid, text, mode="normal"):
     if not CURRENT_MODEL: return "⚠️ AI Failed."
+    
+    # Isolate Context: Only load THIS user's history
     remember(uid, "user", text)
     history_text = "\n".join(MEMORY[uid])
 
@@ -383,8 +386,9 @@ async def photo_handler(m: types.Message):
         media_group_cache.add(m.media_group_id); asyncio.create_task(clean_media_group_cache(m.media_group_id))
 
     f = await bot.get_file(m.photo[-1].file_id)
-    async with get_session() as session:
-        async with session.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}") as r: img = await r.read()
+    # FIX: Correct usage of shared session
+    session = await get_session()
+    async with session.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}") as r: img = await r.read()
 
     # 2. NSFW CHECK
     if NSFW_ENABLED and not is_adm:
@@ -478,7 +482,7 @@ async def text_handler(m: types.Message):
     else:
         spam_counts[m.chat.id].clear(); spam_counts[m.chat.id][user.id] = 1; last_sender[m.chat.id] = user.id
 
-    # 6. Custom Replies / Identity
+    # 6. Custom Replies
     for k, v in REPLIES.items():
         if len(set(text.split()) & set(k.lower().split())) >= 1: return await m.reply(v)
     if any(t in text for t in IDENTITY_TRIGGERS): return await m.reply(IDENTITY_REPLY)
